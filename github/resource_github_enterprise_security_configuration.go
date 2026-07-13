@@ -203,6 +203,14 @@ func resourceGithubEnterpriseSecurityConfiguration() *schema.Resource {
 					"enabled", "disabled", "not_set",
 				}, false)),
 			},
+			"secret_scanning_extended_metadata": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Secret scanning extended metadata setting. Can be one of 'enabled', 'disabled', 'not_set'.",
+				ValidateDiagFunc: validation.ToDiagFunc(validation.StringInSlice([]string{
+					"enabled", "disabled", "not_set",
+				}, false)),
+			},
 			"secret_scanning_delegated_alert_dismissal": {
 				Type:        schema.TypeString,
 				Optional:    true,
@@ -333,6 +341,7 @@ func resourceGithubEnterpriseSecurityConfigurationRead(ctx context.Context, d *s
 		{"secret_scanning_validity_checks", configuration.GetSecretScanningValidityChecks()},
 		{"secret_scanning_non_provider_patterns", configuration.GetSecretScanningNonProviderPatterns()},
 		{"secret_scanning_generic_secrets", configuration.GetSecretScanningGenericSecrets()},
+		{"secret_scanning_extended_metadata", configuration.GetSecretScanningExtendedMetadata()},
 		{"secret_scanning_delegated_alert_dismissal", configuration.GetSecretScanningDelegatedAlertDismissal()},
 		{"secret_protection", configuration.GetSecretProtection()},
 		{"private_vulnerability_reporting", configuration.GetPrivateVulnerabilityReporting()},
@@ -470,6 +479,9 @@ func resourceGithubEnterpriseSecurityConfigurationExpand(d *schema.ResourceData)
 	}
 	if val, ok := d.GetOk("secret_scanning_generic_secrets"); ok {
 		config.SecretScanningGenericSecrets = new(mustSecurityConfigurationValue[string](val, "secret_scanning_generic_secrets"))
+	}
+	if val, ok := d.GetOk("secret_scanning_extended_metadata"); ok {
+		config.SecretScanningExtendedMetadata = new(mustSecurityConfigurationValue[string](val, "secret_scanning_extended_metadata"))
 	}
 	if val, ok := d.GetOk("secret_scanning_delegated_alert_dismissal"); ok {
 		config.SecretScanningDelegatedAlertDismissal = new(mustSecurityConfigurationValue[string](val, "secret_scanning_delegated_alert_dismissal"))

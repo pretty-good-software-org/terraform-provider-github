@@ -84,6 +84,7 @@ resource "github_organization_security_configuration" "with_delegated_bypass" {
 - `secret_scanning_delegated_alert_dismissal` (String) Secret scanning delegated alert dismissal setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_delegated_bypass` (String) Secret scanning delegated bypass setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_delegated_bypass_options` (Block List, Max: 1) Secret scanning delegated bypass options. (see [below for nested schema](#nestedblock--secret_scanning_delegated_bypass_options))
+- `secret_scanning_extended_metadata` (String) Secret scanning extended metadata setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_generic_secrets` (String) Secret scanning generic secrets setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_non_provider_patterns` (String) Secret scanning non-provider patterns setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_push_protection` (String) Secret scanning push protection setting. Can be one of 'enabled', 'disabled', 'not_set'.

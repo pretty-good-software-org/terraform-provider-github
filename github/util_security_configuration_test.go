@@ -422,6 +422,41 @@ func TestExpandCodeSecurityConfigurationCommon(t *testing.T) {
 	}
 }
 
+func TestSecurityConfigurationExpandSecretScanningExtendedMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   map[string]*schema.Schema
+		expander func(*schema.ResourceData) github.CodeSecurityConfiguration
+	}{
+		{
+			name:     "organization",
+			schema:   resourceGithubOrganizationSecurityConfiguration().Schema,
+			expander: resourceGithubOrganizationSecurityConfigurationExpand,
+		},
+		{
+			name:     "enterprise",
+			schema:   resourceGithubEnterpriseSecurityConfiguration().Schema,
+			expander: resourceGithubEnterpriseSecurityConfigurationExpand,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := map[string]any{
+				"name":                              "extended-metadata",
+				"secret_scanning_extended_metadata": "enabled",
+			}
+			data := schema.TestResourceDataRaw(t, test.schema, input)
+
+			configuration := test.expander(data)
+
+			if configuration.GetSecretScanningExtendedMetadata() != "enabled" {
+				t.Errorf("expected SecretScanningExtendedMetadata %q, got %q", "enabled", configuration.GetSecretScanningExtendedMetadata())
+			}
+		})
+	}
+}
+
 func TestExpandSecretScanningDelegatedBypass(t *testing.T) {
 	resourceSchema := resourceGithubOrganizationSecurityConfiguration().Schema
 

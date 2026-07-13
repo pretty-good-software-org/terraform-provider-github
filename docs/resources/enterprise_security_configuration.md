@@ -61,6 +61,7 @@ resource "github_enterprise_security_configuration" "default" {
 - `secret_protection` (String) Secret protection setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning` (String) Secret scanning setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_delegated_alert_dismissal` (String) Secret scanning delegated alert dismissal setting. Can be one of 'enabled', 'disabled', 'not_set'.
+- `secret_scanning_extended_metadata` (String) Secret scanning extended metadata setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_generic_secrets` (String) Secret scanning generic secrets setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_non_provider_patterns` (String) Secret scanning non-provider patterns setting. Can be one of 'enabled', 'disabled', 'not_set'.
 - `secret_scanning_push_protection` (String) Secret scanning push protection setting. Can be one of 'enabled', 'disabled', 'not_set'.
