@@ -1,8 +1,18 @@
 package github
 
 import (
-	"github.com/google/go-github/v88/github"
+	"fmt"
+
+	"github.com/google/go-github/v89/github"
 )
+
+func mustSecurityConfigurationValue[T any](value any, attribute string) T {
+	typedValue, ok := value.(T)
+	if !ok {
+		panic(fmt.Sprintf("code security configuration attribute %q has unexpected type %T", attribute, value))
+	}
+	return typedValue
+}
 
 // flattenDependencyGraphAutosubmitActionOptions converts DependencyGraphAutosubmitActionOptions to a Terraform-compatible format.
 func flattenDependencyGraphAutosubmitActionOptions(options *github.DependencyGraphAutosubmitActionOptions) []any {

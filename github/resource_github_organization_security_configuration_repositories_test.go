@@ -13,6 +13,7 @@ import (
 
 func TestAccGithubOrganizationSecurityConfigurationRepositories(t *testing.T) {
 	t.Parallel()
+	skipUnlessAcceptanceTest(t)
 	skipUnlessHasOrgs(t)
 
 	randomID := acctest.RandStringFromCharSet(5, acctest.CharSetAlphaNum)

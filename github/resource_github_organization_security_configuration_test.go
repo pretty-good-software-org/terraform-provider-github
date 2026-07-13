@@ -15,6 +15,7 @@ import (
 func TestAccGithubOrganizationSecurityConfiguration(t *testing.T) {
 	t.Parallel()
 
+	skipUnlessAcceptanceTest(t)
 	skipUnlessHasOrgs(t)
 
 	// General lifecycle: create -> update -> import. Only the identifying/computed attributes

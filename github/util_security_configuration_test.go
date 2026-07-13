@@ -3,9 +3,18 @@ package github
 import (
 	"testing"
 
-	"github.com/google/go-github/v88/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
+
+func requireSecurityConfigurationValue[T any](t *testing.T, value any, description string) T {
+	t.Helper()
+	typedValue, ok := value.(T)
+	if !ok {
+		t.Fatalf("expected %s to have type %T, got %T", description, *new(T), value)
+	}
+	return typedValue
+}
 
 func TestFlattenDependencyGraphAutosubmitActionOptions(t *testing.T) {
 	tests := []struct {
@@ -29,7 +38,7 @@ func TestFlattenDependencyGraphAutosubmitActionOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened autosubmit options")
 				if _, ok := m["labeled_runners"]; ok {
 					t.Errorf("labeled_runners should be absent when LabeledRunners is nil")
 				}
@@ -42,7 +51,7 @@ func TestFlattenDependencyGraphAutosubmitActionOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened autosubmit options")
 				if m["labeled_runners"] != true {
 					t.Errorf("expected labeled_runners true, got %v", m["labeled_runners"])
 				}
@@ -80,7 +89,7 @@ func TestFlattenCodeScanningOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened code scanning options")
 				if _, ok := m["allow_advanced"]; ok {
 					t.Errorf("allow_advanced should be absent when AllowAdvanced is nil")
 				}
@@ -93,7 +102,7 @@ func TestFlattenCodeScanningOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened code scanning options")
 				if m["allow_advanced"] != true {
 					t.Errorf("expected allow_advanced true, got %v", m["allow_advanced"])
 				}
@@ -106,7 +115,7 @@ func TestFlattenCodeScanningOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened code scanning options")
 				if m["allow_advanced"] != false {
 					t.Errorf("expected allow_advanced false, got %v", m["allow_advanced"])
 				}
@@ -144,7 +153,7 @@ func TestFlattenSecretScanningDelegatedBypassOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened delegated bypass options")
 				if _, ok := m["reviewers"]; ok {
 					t.Errorf("reviewers should be absent when Reviewers is nil")
 				}
@@ -162,7 +171,7 @@ func TestFlattenSecretScanningDelegatedBypassOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened delegated bypass options")
 				reviewers, ok := m["reviewers"].([]any)
 				if !ok {
 					t.Fatalf("expected reviewers to be []any, got %T", m["reviewers"])
@@ -170,14 +179,14 @@ func TestFlattenSecretScanningDelegatedBypassOptions(t *testing.T) {
 				if len(reviewers) != 2 {
 					t.Fatalf("expected 2 reviewers, got %d", len(reviewers))
 				}
-				first := reviewers[0].(map[string]any)
+				first := requireSecurityConfigurationValue[map[string]any](t, reviewers[0], "first flattened reviewer")
 				if first["reviewer_id"] != int64(42) {
 					t.Errorf("expected reviewer_id 42, got %v", first["reviewer_id"])
 				}
 				if first["reviewer_type"] != "TEAM" {
 					t.Errorf("expected reviewer_type TEAM, got %v", first["reviewer_type"])
 				}
-				second := reviewers[1].(map[string]any)
+				second := requireSecurityConfigurationValue[map[string]any](t, reviewers[1], "second flattened reviewer")
 				if second["reviewer_id"] != int64(99) {
 					t.Errorf("expected reviewer_id 99, got %v", second["reviewer_id"])
 				}
@@ -218,7 +227,7 @@ func TestFlattenCodeScanningDefaultSetupOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened default setup options")
 				if _, ok := m["runner_type"]; ok {
 					t.Errorf("runner_type should be absent when RunnerType is empty, got %q", m["runner_type"])
 				}
@@ -231,7 +240,7 @@ func TestFlattenCodeScanningDefaultSetupOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened default setup options")
 				if m["runner_type"] != "standard" {
 					t.Errorf("expected runner_type %q, got %q", "standard", m["runner_type"])
 				}
@@ -247,7 +256,7 @@ func TestFlattenCodeScanningDefaultSetupOptions(t *testing.T) {
 				if len(result) != 1 {
 					t.Fatalf("expected 1 element, got %d", len(result))
 				}
-				m := result[0].(map[string]any)
+				m := requireSecurityConfigurationValue[map[string]any](t, result[0], "flattened default setup options")
 				if m["runner_label"] != "my-runner" {
 					t.Errorf("expected runner_label %q, got %q", "my-runner", m["runner_label"])
 				}
