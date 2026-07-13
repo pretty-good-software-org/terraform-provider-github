@@ -2,9 +2,6 @@
 # behavior.
 version: 2
 
-env:
-  - COSIGN_YES=true
-
 before:
   hooks:
     # this is just an example and not a requirement for provider building/publishing
@@ -50,6 +47,17 @@ checksum:
       name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
   name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
   algorithm: sha256
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+    output: true
 
 release:
   extra_files:
