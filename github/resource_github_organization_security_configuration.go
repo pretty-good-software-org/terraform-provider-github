@@ -469,12 +469,12 @@ func resourceGithubOrganizationSecurityConfigurationDelete(ctx context.Context, 
 }
 
 func resourceGithubOrganizationSecurityConfigurationImport(_ context.Context, d *schema.ResourceData, _ any) ([]*schema.ResourceData, error) {
-	configID, err := strconv.ParseInt(d.Id(), 10, 64)
+	configID, err := strconv.Atoi(d.Id())
 	if err != nil {
 		return nil, fmt.Errorf("invalid configuration_id %q: %w", d.Id(), err)
 	}
 
-	if err = d.Set("configuration_id", int(configID)); err != nil {
+	if err = d.Set("configuration_id", configID); err != nil {
 		return nil, err
 	}
 

@@ -416,7 +416,7 @@ func resourceGithubEnterpriseSecurityConfigurationImport(_ context.Context, d *s
 		return nil, fmt.Errorf("invalid import specified: supplied import must be written as <enterprise_slug>:<configuration_id>. Parse error: %w", err)
 	}
 
-	configID, err := strconv.ParseInt(configIDStr, 10, 64)
+	configID, err := strconv.Atoi(configIDStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid configuration_id %q: %w", configIDStr, err)
 	}
@@ -425,7 +425,7 @@ func resourceGithubEnterpriseSecurityConfigurationImport(_ context.Context, d *s
 		return nil, err
 	}
 
-	if err = d.Set("configuration_id", int(configID)); err != nil {
+	if err = d.Set("configuration_id", configID); err != nil {
 		return nil, err
 	}
 
