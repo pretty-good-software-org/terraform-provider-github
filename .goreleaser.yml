@@ -2,9 +2,6 @@
 # behavior.
 version: 2
 
-env:
-  - COSIGN_YES=true
-
 before:
   hooks:
     # this is just an example and not a requirement for provider building/publishing
@@ -52,27 +49,15 @@ checksum:
   algorithm: sha256
 
 signs:
-  - id: gpg
-    cmd: gpg
-    args:
-      - --batch
-      - --local-user
-      - "{{ .Env.GPG_FINGERPRINT }}"
-      - --output
-      - "${signature}"
-      - --detach-sign
-      - "${artifact}"
-    artifacts: checksum
-  - id: cosign
-    signature: "${artifact}.sbom.json.bundle"
-    cmd: cosign
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
-      - --new-bundle-format
-      - --bundle
-      - "${signature}"
+      - "--bundle=${signature}"
       - "${artifact}"
+      - --yes
     artifacts: checksum
+    output: true
 
 release:
   extra_files:

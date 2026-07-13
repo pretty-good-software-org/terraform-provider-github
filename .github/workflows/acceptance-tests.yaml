@@ -46,6 +46,7 @@ jobs:
           INPUT_GITHUB_HEAD_SHA: ${{ case(github.event_name == 'pull_request' || github.event_name == 'pull_request_target', github.event.pull_request.head.sha, github.sha) }}
           INPUT_GITHUB_BASE_REPO: ${{ case(github.event_name == 'pull_request' || github.event_name == 'pull_request_target', github.event.pull_request.base.repo.full_name, github.repository) }}
           INPUT_ACCTEST_LABEL_SET: ${{ contains(github.event.pull_request.labels.*.name, 'acctest') }}
+          INPUT_ACCTEST_ENABLED: ${{ vars.GH_TEST_ENABLED == 'true' }}
         run: |
           set -euo pipefail
 
@@ -54,25 +55,23 @@ jobs:
           test="false"
           environment="acctest-dotcom-untrusted"
 
-          if [[ "${INPUT_PULL_REQUEST}" == "false" ]]; then
+          if [[ "${INPUT_ACCTEST_ENABLED}" != "true" ]]; then
+            echo "::notice::Skipping live acceptance tests because GH_TEST_ENABLED is not true."
+          elif [[ "${INPUT_PULL_REQUEST}" == "false" ]]; then
             fork="false"
             test="true"
             environment="acctest-dotcom"
             echo "::notice::Running in ${GITHUB_EVENT_NAME} context, proceeding with tests."
+          elif [[ "${INPUT_GITHUB_HEAD_REPO}" == "${INPUT_GITHUB_BASE_REPO}" ]]; then
+            fork="false"
+            test="true"
+            environment="acctest-dotcom"
+            echo "::notice::Running in ${GITHUB_EVENT_NAME} context from the base repository, proceeding with tests."
+          elif [[ "${INPUT_ACCTEST_LABEL_SET}" == "true" ]]; then
+            test="true"
+            echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, proceeding with tests as acctest label is set."
           else
-            if [[ "${INPUT_GITHUB_HEAD_REPO}" == "${INPUT_GITHUB_BASE_REPO}" ]]; then
-              fork="false"
-              test="true"
-              environment="acctest-dotcom"
-              echo "::notice::Running in ${GITHUB_EVENT_NAME} context from the base repository, proceeding with tests."
-            else
-              if [[ "${INPUT_ACCTEST_LABEL_SET}" == "true" ]]; then
-                test="true"
-                echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, proceeding with tests as acctest label is set."
-              else
-                echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, skipping tests as acctest label is not set."
-              fi
-            fi
+            echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, skipping tests as acctest label is not set."
           fi
 
           {
@@ -253,7 +252,7 @@ jobs:
           INPUT_RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           set -euo pipefail
-          read -a results <<< "${INPUT_RESULTS}"
+          read -r -a results <<< "${INPUT_RESULTS}"
           for result in "${results[@]}"; do
             if [[ "${result}" == "failure" ]] || [[ "${result}" == "cancelled" ]]; then
               echo "::error::Workflow failed!"

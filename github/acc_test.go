@@ -329,6 +329,12 @@ func sweepRepositories(_ string) error {
 	return nil
 }
 
+func skipUnlessAcceptanceTest(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("Skipping acceptance test because TF_ACC is not set")
+	}
+}
+
 func skipUnauthenticated(t *testing.T) {
 	if testAccConf.authMode == anonymous {
 		t.Skip("Skipping as test mode not authenticated")

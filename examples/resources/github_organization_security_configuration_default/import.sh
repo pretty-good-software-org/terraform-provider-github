@@ -1,0 +1,1 @@
+terraform import github_organization_security_configuration_default.example 123456
