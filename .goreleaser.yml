@@ -51,29 +51,6 @@ checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
   algorithm: sha256
 
-signs:
-  - id: gpg
-    cmd: gpg
-    args:
-      - --batch
-      - --local-user
-      - "{{ .Env.GPG_FINGERPRINT }}"
-      - --output
-      - "${signature}"
-      - --detach-sign
-      - "${artifact}"
-    artifacts: checksum
-  - id: cosign
-    signature: "${artifact}.sbom.json.bundle"
-    cmd: cosign
-    args:
-      - sign-blob
-      - --new-bundle-format
-      - --bundle
-      - "${signature}"
-      - "${artifact}"
-    artifacts: checksum
-
 release:
   extra_files:
     - glob: terraform-registry-manifest.json

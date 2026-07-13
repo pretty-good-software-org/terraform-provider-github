@@ -200,6 +200,8 @@ func NewProvider() func() *schema.Provider {
 				"github_organization_role_team_assignment":                              resourceGithubOrganizationRoleTeamAssignment(),
 				"github_organization_ruleset":                                           resourceGithubOrganizationRuleset(),
 				"github_organization_security_configuration":                            resourceGithubOrganizationSecurityConfiguration(),
+				"github_organization_security_configuration_default":                    resourceGithubOrganizationSecurityConfigurationDefault(),
+				"github_organization_security_configuration_repositories":               resourceGithubOrganizationSecurityConfigurationRepositories(),
 				"github_organization_security_manager":                                  resourceGithubOrganizationSecurityManager(),
 				"github_organization_settings":                                          resourceGithubOrganizationSettings(),
 				"github_organization_webhook":                                           resourceGithubOrganizationWebhook(),

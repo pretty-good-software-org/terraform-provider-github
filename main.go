@@ -8,7 +8,7 @@ import (
 
 func main() {
 	opts := &plugin.ServeOpts{
-		ProviderAddr: "registry.terraform.io/integrations/github",
+		ProviderAddr: "registry.opentofu.org/pretty-good-software-org/github",
 		ProviderFunc: github.NewProvider(),
 	}
 
