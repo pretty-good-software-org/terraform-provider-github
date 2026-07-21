@@ -24,7 +24,7 @@ pre-commit:
     check-merge-conflict:
       glob: "**/*.{go,yaml,yml,md,json,toml}"
       run: |
-        if grep -Hn '^<<<<<<< \|^=======$\|^>>>>>>> ' {staged_files} 2>/dev/null; then
+        if grep -HnE '^<<<<<<< |^=======$|^>>>>>>> ' {staged_files} 2>/dev/null; then
           echo "Merge conflict markers found"
           exit 1
         fi
