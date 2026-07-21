@@ -22,6 +22,7 @@ from pathlib import Path
 
 STALE_LOCK_SECONDS = 60
 HANDSHAKE_WAIT_SECONDS = 5
+OWNER_EXIT_CONFIRMATION_ATTEMPTS = 3
 POLL_SECONDS = 0.1
 PROCESS_STOP_SECONDS = 5
 COMPLETION_MARKER = ".mdformat-complete"
@@ -345,6 +346,22 @@ class Supervisor:
         # The child is permitted to exist only behind the pipe and cannot have
         # started the installer. Reclaiming here cannot overlap installation.
 
+    @staticmethod
+    def ownerless_lock_is_reclaimable(lock_age: int) -> bool:
+        return lock_age > STALE_LOCK_SECONDS
+
+    def owner_is_confirmed_dead(self, pid: int, started: str) -> bool:
+        # `ps` can fail transiently under load. Require consecutive misses so
+        # one failed lookup cannot steal a live owner's lock and delete its
+        # staging generation. A genuinely dead owner is recovered in under a
+        # second, preserving crash-resume behavior.
+        for attempt in range(OWNER_EXIT_CONFIRMATION_ATTEMPTS):
+            if self._process_matches(pid, started):
+                return False
+            if attempt + 1 < OWNER_EXIT_CONFIRMATION_ATTEMPTS:
+                time.sleep(POLL_SECONDS)
+        return True
+
     def _recover_stale_lock(self) -> bool:
         try:
             lock_metadata = self.lock_dir.lstat()
@@ -353,19 +370,19 @@ class Supervisor:
         except OSError as error:
             raise SetupError(f"inspect setup lock {self.lock_dir}: {error}") from error
         self._assert_directory_metadata(self.lock_dir, lock_metadata)
+        lock_age = max(0, int(time.time() - lock_metadata.st_mtime))
         owner = self._read_record_if_present(OWNER_RECORD)
         if owner is None:
             if not self.lock_dir.exists():
                 return True
-            lock_age = max(0, int(time.time() - lock_metadata.st_mtime))
-            if lock_age > STALE_LOCK_SECONDS:
+            if self.ownerless_lock_is_reclaimable(lock_age):
                 return self._move_stale_lock()
             return False
         owner_pid = owner.get("pid")
         owner_started = owner.get("started")
         if not isinstance(owner_pid, int) or not isinstance(owner_started, str):
             raise SetupError(f"malformed setup lock owner: {self.lock_dir / OWNER_RECORD}")
-        if self._process_matches(owner_pid, owner_started):
+        if not self.owner_is_confirmed_dead(owner_pid, owner_started):
             return False
 
         worker = self._read_record_if_present(WORKER_RECORD)
