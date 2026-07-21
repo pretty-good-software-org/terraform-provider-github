@@ -103,6 +103,7 @@ eventually-consistent endpoints. See
 ## API Safety and Performance
 
 - Flag new N+1 access patterns over GitHub APIs.
+
 - Verify pagination is handled on any endpoint that returns a list.
   Prefer the iterator pattern that `google/go-github` exposes via its
   generated `*Iter` methods, which return `iter.Seq2[T, error]` and
@@ -121,8 +122,10 @@ eventually-consistent endpoints. See
   in existing code, but flag new pagination code that hand-rolls the
   `NextPage` loop when a corresponding `*Iter` method exists on the
   client.
+
 - Check for rate-limit-sensitive loops; consider caching or batching where
   appropriate.
+
 - Sensitive values must never appear in log output, even at debug/trace
   level.
 

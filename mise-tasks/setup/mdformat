@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#MISE description="Install mdformat and plugins from the hash-locked requirements"
+set -euo pipefail
+
+readonly setup_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=/dev/null
+source "${setup_dir}/mdformat-env"
+readonly project_root="${mdformat_project_root}"
+readonly requirements_lock="${project_root}/mdformat-requirements.lock"
+readonly environment_dir="${MISE_MDFORMAT_ENV_DIR:?Mise did not derive the mdformat environment path}"
+readonly environment_parent="${mdformat_environment_parent:?Mise did not derive the mdformat cache path}"
+readonly lock_dir="${environment_dir}.lock"
+readonly supervisor_script="${setup_dir}/mdformat-supervisor"
+readonly worker_script="${setup_dir}/mdformat-worker"
+
+python_bin="$(mise which python)" || {
+  printf 'mdformat setup: failed to locate Mise-managed Python\n' >&2
+  exit 1
+}
+uv_bin="$(mise which uv)" || {
+  printf 'mdformat setup: failed to locate Mise-managed uv\n' >&2
+  exit 1
+}
+bash_bin="$(command -v bash)" || {
+  printf 'mdformat setup: failed to locate Bash\n' >&2
+  exit 1
+}
+[[ "$python_bin" == /* && "$uv_bin" == /* && "$bash_bin" == /* ]] || {
+  printf 'mdformat setup: a required tool path is not absolute\n' >&2
+  exit 1
+}
+
+# The Python supervisor owns the lock, process group, and synchronous
+# `uv pip sync --require-hashes` lifecycle. exec preserves its owner PID.
+exec "$python_bin" "$supervisor_script" \
+  "$project_root" \
+  "$environment_parent" \
+  "$environment_dir" \
+  "$lock_dir" \
+  "$MISE_MDFORMAT_ENV_ID" \
+  "$python_bin" \
+  "$uv_bin" \
+  "$requirements_lock" \
+  "$worker_script" \
+  "$bash_bin"

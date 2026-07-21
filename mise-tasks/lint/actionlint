@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Lint GitHub Actions workflows"
+set -euo pipefail
+
+# Existing provider workflows retain their upstream syntax and validation.
+actionlint -color -oneline .github/workflows/tooling.yaml

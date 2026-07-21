@@ -37,6 +37,12 @@ For instructions on how to contribute to the GitHub Terraform provider, see the 
 
 This project uses [Milestones](https://github.com/integrations/terraform-provider-github/milestones) to scope upcoming features and bug fixes. Issues that receive the most recent discussion or the most reactions will be more likely to be included in an upcoming release.
 
+## Development Toolchain
+
+Development tools are pinned by Mise and locked for six POSIX targets: Linux ARM64, Linux ARM64 musl, Linux x64, Linux x64 musl, macOS ARM64, and macOS x64. Windows tool entries are intentionally absent. The Python lock environment sets `compile = false` and records GitHub attestation provenance for its platform artifacts.
+
+Use `mise run setup:default` to install the locked tools and configure hooks. Safe local checks are available as `mise run lint:default`, `mise run test:default`, and `mise run lint:vulncheck`. Provider documentation remains owned by the existing `tfplugindocs` generation and validation tasks.
+
 ## Support
 
 GitHub Support does not provide support for this integration. This is a community-supported project. GitHub's SDK team triages issues and PRs periodically.

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Check provider dependencies for known vulnerabilities"
+set -euo pipefail
+
+# Build the scanner with the pinned provider Go toolchain. The prebuilt
+# govulncheck binary targets an older Go parser and cannot inspect Go 1.26.
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

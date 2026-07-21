@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="Read the published mdformat version"
+#MISE depends=["setup:mdformat"]
+set -euo pipefail
+
+# Read through the active pointer directly so this task only validates the
+# formatter publication, not any consumer-specific lint task.
+source "${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}/mise-tasks/setup/mdformat-env"
+readonly mdformat_bin="${MISE_MDFORMAT_ENV_DIR:?Mise did not derive the mdformat environment path}/bin/mdformat"
+[[ -x "$mdformat_bin" ]] || {
+  printf 'mdformat version check: published executable is missing: %s\n' "$mdformat_bin" >&2
+  exit 1
+}
+"$mdformat_bin" --version

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Install locked tools and configure local hooks"
+set -euo pipefail
+
+mise install --locked
+mise run setup:mdformat
+MISE_ENV=development mise install --locked
+MISE_ENV=development mise exec -- lefthook install

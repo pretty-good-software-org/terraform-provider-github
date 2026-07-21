@@ -133,14 +133,14 @@ In addition to using the GitHub CLI, you can verify SLSA provenance attestations
 ### Prerequisites
 
 1. Install `cosign` for verifying attestations. See the [installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/).
-2. Install `gh` (GitHub CLI) if you haven't already. See the [installation instructions](https://github.com/cli/cli#installation).
+1. Install `gh` (GitHub CLI) if you haven't already. See the [installation instructions](https://github.com/cli/cli#installation).
 
 ### Download and Verify Attestation
 
 > [!NOTE]
 > Make sure to replace x.y.z with the actual release tag you want to verify.
 > Replace artifact name with the actual artifact you want to verify.
-
+>
 > [!NOTE]
 > Not all artifacts may have attestations generated for them. Please check the [repository attestations](https://github.com/integrations/terraform-provider-github/attestations) to see which artifacts have attestations available.
 >

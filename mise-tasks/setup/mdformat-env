@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# This file is sourced by Mise and setup:mdformat.
+
+mdformat_sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+    return
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r | awk '{print $1}'
+    return
+  fi
+  printf 'mdformat environment: no SHA-256 utility is available\n' >&2
+  return 1
+}
+
+mdformat_env_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ -n "${MISE_PROJECT_ROOT:-}" ]]; then
+  mdformat_project_root="$(cd -- "$MISE_PROJECT_ROOT" && pwd -P)"
+else
+  mdformat_project_root="$(cd -- "${mdformat_env_script_dir}/../.." && pwd -P)"
+fi
+mdformat_requirements_lock="${mdformat_project_root}/mdformat-requirements.lock"
+[[ -f "$mdformat_requirements_lock" ]] || {
+  printf 'mdformat environment: requirements lock is missing: %s\n' "$mdformat_requirements_lock" >&2
+  return 1 2>/dev/null || exit 1
+}
+
+mdformat_tool_config_root="$mdformat_project_root"
+if [[ ! -f "${mdformat_tool_config_root}/.mise.toml" ]]; then
+  mdformat_tool_config_root="$mdformat_env_script_dir/../.."
+fi
+
+mdformat_tool_version() {
+  local tool="$1"
+  awk -v tool="$tool" '
+    /^\[tools\]$/ { in_tools = 1; next }
+    /^\[/ { in_tools = 0 }
+    in_tools && $0 ~ "^[[:space:]]*" tool "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*(#.*)?$/, "")
+      gsub(/^"|"$/, "")
+      print
+      exit
+    }
+  ' "${mdformat_tool_config_root}/.mise.toml"
+}
+
+# Mise evaluates this sourced file while resolving tools. Calling `mise which`
+# here would recurse, so identities come from the pinned declarations plus the
+# complete lock provenance, not version strings alone.
+mdformat_python_identity="$(mdformat_tool_version python)"
+mdformat_uv_identity="$(mdformat_tool_version uv)"
+mdformat_mise_lock="${mdformat_tool_config_root}/mise.lock"
+[[ -n "$mdformat_python_identity" && -n "$mdformat_uv_identity" && -f "$mdformat_mise_lock" ]] || {
+  printf 'mdformat environment: Python, uv, or mise.lock identity is missing\n' >&2
+  return 1 2>/dev/null || exit 1
+}
+
+mdformat_repository_id="$(printf '%s\0' "$mdformat_project_root" | mdformat_sha256_stream)" || return 1 2>/dev/null || exit 1
+mdformat_lock_id="$(mdformat_sha256_stream < "$mdformat_requirements_lock")" || return 1 2>/dev/null || exit 1
+mdformat_mise_lock_id="$(mdformat_sha256_stream < "$mdformat_mise_lock")" || return 1 2>/dev/null || exit 1
+mdformat_tool_id="$({ cat "${mdformat_tool_config_root}/.mise.toml"; printf '\0'; cat "$mdformat_mise_lock"; } | mdformat_sha256_stream)" || return 1 2>/dev/null || exit 1
+
+mdformat_canonicalize_cache_configuration() {
+  local configured_path="$1" missing_suffix="" parent
+  [[ "$configured_path" == /* ]] || {
+    printf 'mdformat environment: XDG_CACHE_HOME must be an absolute path: %s\n' "$configured_path" >&2
+    return 1
+  }
+  while [[ ! -e "$configured_path" && ! -L "$configured_path" ]]; do
+    parent="$(dirname -- "$configured_path")"
+    [[ "$parent" != "$configured_path" ]] || {
+      printf 'mdformat environment: cannot canonicalize cache path: %s\n' "$configured_path" >&2
+      return 1
+    }
+    missing_suffix="/$(basename -- "$configured_path")${missing_suffix}"
+    configured_path="$parent"
+  done
+  [[ -d "$configured_path" ]] || {
+    printf 'mdformat environment: configured cache path is not a directory: %s\n' "$configured_path" >&2
+    return 1
+  }
+  configured_path="$(cd -- "$configured_path" && pwd -P)" || {
+    printf 'mdformat environment: cannot canonicalize configured cache path\n' >&2
+    return 1
+  }
+  printf '%s%s\n' "$configured_path" "$missing_suffix"
+}
+
+mdformat_configured_cache_home="${XDG_CACHE_HOME:-${HOME:?HOME must be set}/.cache}"
+mdformat_configured_cache_home="$(mdformat_canonicalize_cache_configuration "$mdformat_configured_cache_home")" || return 1 2>/dev/null || exit 1
+# The configured XDG directory may be a symlink and is canonicalized above.
+# The managed root itself is checked with lstat by the Python supervisor before
+# any resolve operation so a cache-root redirect cannot receive writes.
+mdformat_cache_root="${mdformat_configured_cache_home}/mise-mdformat"
+mdformat_environment_parent="${mdformat_cache_root}/${mdformat_repository_id}/${mdformat_lock_id}/${mdformat_tool_id}"
+
+export MISE_MDFORMAT_ENV_ID="${mdformat_repository_id}-${mdformat_lock_id}-${mdformat_tool_id}"
+export MISE_MDFORMAT_ENV_DIR="${mdformat_environment_parent}/active"
+export MISE_MDFORMAT_PYTHON_ID="$mdformat_python_identity"
+export MISE_MDFORMAT_UV_ID="$mdformat_uv_identity"
+export MISE_MDFORMAT_TOOL_ID="$mdformat_tool_id"
+export MISE_MDFORMAT_TOOL_PROVENANCE_ID="$mdformat_mise_lock_id"
+# Always prepend the active generation. Merely finding this path later in PATH
+# would allow an inherited global mdformat to win.
+export PATH="${MISE_MDFORMAT_ENV_DIR}/bin:${PATH}"

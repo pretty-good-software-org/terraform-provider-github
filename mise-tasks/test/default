@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run provider unit tests"
+set -euo pipefail
+
+make test

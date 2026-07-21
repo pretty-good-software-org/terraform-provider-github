@@ -1,0 +1,840 @@
+#!/usr/bin/env bash
+#MISE description="Test hash enforcement, plugins, versions, idempotence, and concurrency"
+set -euo pipefail
+
+readonly project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
+readonly setup_task="${project_root}/mise-tasks/setup/mdformat"
+readonly environment_script="${project_root}/mise-tasks/setup/mdformat-env"
+readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/mdformat-test.XXXXXX")"
+readonly cache_home="${MDFORMAT_TEST_CACHE_HOME:-${test_root}/cache}"
+readonly environment_dir="$(XDG_CACHE_HOME="$cache_home" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+readonly environment_python="${environment_dir}/bin/python"
+readonly python_bin="$(mise which python)"
+readonly uv_bin="$(mise which uv)"
+readonly real_mise="$(command -v mise)"
+
+"$python_bin" -m unittest discover -s "${project_root}/test" -p 'test_mdformat_supervisor.py'
+
+fake_mise_for_uv() {
+  local bin="$1" fake_uv="$2"
+  cat > "${bin}/mise" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == which && "\${2:-}" == uv ]]; then
+  printf '%s\\n' "$fake_uv"
+else
+  exec "$real_mise" "\$@"
+fi
+EOF
+  chmod +x "${bin}/mise"
+}
+
+copy_setup_scripts() {
+  local destination="$1" script
+  mkdir -p "$destination"
+  for script in mdformat mdformat-env mdformat-supervisor mdformat-worker; do
+    cp "$project_root/mise-tasks/setup/$script" "$destination/$script"
+  done
+  chmod +x "$destination"/*
+}
+
+cleanup() {
+  local status=$? cleanup_failed=0
+  rm -rf "$test_root" || {
+    printf 'mdformat tests: failed to remove test directory: %s\n' "$test_root" >&2
+    cleanup_failed=1
+  }
+  if ((status == 0 && cleanup_failed)); then
+    status=1
+  fi
+  trap - EXIT
+  exit "$status"
+}
+trap cleanup EXIT
+
+assert_equal() {
+  local expected="$1" actual="$2" message="$3"
+  [[ "$actual" == "$expected" ]] || {
+    printf 'mdformat tests: %s: expected %s, got %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  }
+}
+
+package_version() {
+  "$environment_python" -c \
+    'import importlib.metadata as metadata; import sys; print(metadata.version(sys.argv[1]))' "$1"
+}
+
+assert_no_artifacts() {
+  local target="$1" artifact
+  local parent="$(dirname -- "$target")"
+  for artifact in "${parent}/staging."* "${parent}/pointer."* "${parent}/active.quarantine."* "${target}.tmp."* "${target}.previous."*; do
+    if [[ -e "$artifact" || -L "$artifact" ]]; then
+      printf 'mdformat tests: stale setup artifact remains for %s: %s\n' "$target" "$artifact" >&2
+      exit 1
+    fi
+  done
+}
+
+XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+
+"$python_bin" - "$project_root/mise-tasks/setup/mdformat-supervisor" <<'PY'
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from unittest import TestCase, main
+from unittest.mock import patch
+import sys
+import types
+
+supervisor_path = sys.argv[1]
+module = types.ModuleType("mdformat_supervisor")
+SourceFileLoader(module.__name__, supervisor_path).exec_module(module)
+
+
+class LauncherOwnershipTests(TestCase):
+    def setUp(self) -> None:
+        self.supervisor = object.__new__(module.Supervisor)
+
+    def test_reused_launcher_pid_is_never_signalled(self) -> None:
+        with (
+            patch.object(module.Supervisor, "_process_matches", return_value=False),
+            patch.object(module.os, "kill") as kill,
+        ):
+            self.supervisor._terminate_recorded_worker(
+                {"pid": 1234, "started": "recorded-before-pid-reuse"}
+            )
+        kill.assert_not_called()
+
+
+class DisappearingLockTests(TestCase):
+    def setUp(self) -> None:
+        self.supervisor = object.__new__(module.Supervisor)
+        self.supervisor.lock_dir = Path("/cache/active.lock")
+
+    def test_record_disappearing_after_presence_check_is_absent(self) -> None:
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "lstat", side_effect=FileNotFoundError),
+        ):
+            actual = self.supervisor._read_record_if_present(module.OWNER_RECORD)
+        self.assertIsNone(actual, "a concurrently removed lock record must be treated as absent")
+
+    def test_lock_disappearing_before_inspection_retries_acquisition(self) -> None:
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "lstat", side_effect=FileNotFoundError),
+        ):
+            actual = self.supervisor._recover_stale_lock()
+        self.assertTrue(actual, "a concurrently removed lock directory must retry acquisition")
+
+
+main(argv=["mdformat-supervisor-race-test"])
+PY
+
+portable_worker_copy="${test_root}/portable-worker"
+portable_worker_cache="${test_root}/portable-worker-cache"
+copy_setup_scripts "$portable_worker_copy"
+"$python_bin" - "$portable_worker_copy/mdformat-worker" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+lines[0] = "#!/a-deliberately-missing-shell\n"
+path.write_text("".join(lines))
+PY
+XDG_CACHE_HOME="$portable_worker_cache" bash "$portable_worker_copy/mdformat" >/dev/null
+portable_worker_environment="$(XDG_CACHE_HOME="$portable_worker_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+[[ -x "$portable_worker_environment/bin/mdformat" ]] || {
+  printf 'mdformat tests: worker depended on its non-portable shebang\n' >&2
+  exit 1
+}
+
+linux_lib_copy="${test_root}/linux-lib-worker"
+linux_lib_cache="${test_root}/linux-lib-cache"
+copy_setup_scripts "$linux_lib_copy"
+# This fixture intentionally keeps a shell after uv so it can add the Linux
+# venv compatibility link. The production worker execs the final command so
+# the installer remains the launcher's direct child.
+"$python_bin" - "$linux_lib_copy/mdformat-worker" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = 'exec "$uv_bin" pip sync \\\n'
+if needle not in text:
+    raise SystemExit("Linux lib fixture could not find the final worker exec")
+path.write_text(text.replace(needle, '"$uv_bin" pip sync \\\n', 1))
+PY
+cat >> "$linux_lib_copy/mdformat-worker" <<'EOF'
+if [[ ! -L "$temporary_environment_dir/lib64" ]]; then
+  ln -s lib "$temporary_environment_dir/lib64"
+fi
+EOF
+XDG_CACHE_HOME="$linux_lib_cache" bash "$linux_lib_copy/mdformat" >/dev/null
+linux_lib_environment="$(XDG_CACHE_HOME="$linux_lib_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+[[ -L "$linux_lib_environment/lib64" && "$(readlink "$linux_lib_environment/lib64")" == "lib" ]] || {
+  printf 'mdformat tests: standard Linux venv lib64 link was not retained safely\n' >&2
+  exit 1
+}
+
+canonical_xdg_target="${test_root}/canonical-xdg-target"
+canonical_xdg_alias="${test_root}/canonical-xdg-alias"
+mkdir -p "$canonical_xdg_target"
+ln -s "$canonical_xdg_target" "$canonical_xdg_alias"
+canonical_environment="$(XDG_CACHE_HOME="$canonical_xdg_alias" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+canonical_xdg_path="$(cd -- "$canonical_xdg_target" && pwd -P)"
+[[ "$canonical_environment" == "$canonical_xdg_path/mise-mdformat/"* ]] || {
+  printf 'mdformat tests: XDG cache configuration was not canonicalized: %s\n' "$canonical_environment" >&2
+  exit 1
+}
+
+redirect_xdg="${test_root}/redirect-xdg"
+redirect_target="${test_root}/redirect-target"
+mkdir -p "$redirect_xdg" "$redirect_target"
+ln -s "$redirect_target" "${redirect_xdg}/mise-mdformat"
+redirect_environment="$(XDG_CACHE_HOME="$redirect_xdg" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+set +e
+redirect_output="$(XDG_CACHE_HOME="$redirect_xdg" MISE_PROJECT_ROOT="$project_root" bash "$setup_task" 2>&1)"
+redirect_status=$?
+set -e
+((redirect_status != 0)) || {
+  printf 'mdformat tests: managed cache-root symlink was followed\n%s\n' "$redirect_output" >&2
+  exit 1
+}
+[[ ! -e "${redirect_target}/mise-mdformat" ]] || {
+  printf 'mdformat tests: managed cache-root redirect received writes: %s\n' "$redirect_target" >&2
+  exit 1
+}
+redirect_xdg_canonical="$(cd -- "$redirect_xdg" && pwd -P)"
+[[ "$redirect_environment" == "${redirect_xdg_canonical}/mise-mdformat/"* ]] || {
+  printf 'mdformat tests: redirect test did not preserve the managed-root boundary\n' >&2
+  exit 1
+}
+
+assert_equal "1.0.0" "$(package_version mdformat)" "mdformat version"
+assert_equal "2.1.2" "$(package_version mdformat-frontmatter)" "frontmatter plugin version"
+assert_equal "1.0.0" "$(package_version mdformat-gfm)" "GFM plugin version"
+
+sample_markdown="${test_root}/sample.md"
+printf '%s\n' '---' 'title: sample' '---' '' '|a|b|' '|-|-|' '|1|2|' > "$sample_markdown"
+"$environment_dir/bin/mdformat" "$sample_markdown"
+"$environment_dir/bin/mdformat" --check "$sample_markdown"
+
+bypass_bin="${test_root}/bypass-bin"
+bypass_proof="${test_root}/bypass-proof"
+mkdir -p "$bypass_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "UNLOCKED-MDFORMAT %s\\n" "$*" > "$PROOF"' > "$bypass_bin/mdformat"
+chmod +x "$bypass_bin/mdformat"
+PROOF="$bypass_proof" PATH="${bypass_bin}:$PATH" XDG_CACHE_HOME="$cache_home" mise run format:markdown >/dev/null
+[[ ! -e "$bypass_proof" ]] || {
+  printf 'mdformat tests: format task used an inherited mdformat\n' >&2
+  exit 1
+}
+
+inherited_uv_bin="${test_root}/inherited-uv-bin"
+inherited_uv_proof="${test_root}/inherited-uv-proof"
+inherited_uv_cache="${test_root}/inherited-uv-cache"
+mkdir -p "$inherited_uv_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "INHERITED-UV\n" > "$PROOF"' > "$inherited_uv_bin/uv"
+chmod +x "$inherited_uv_bin/uv"
+cat > "$inherited_uv_bin/mise" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == which && "\${2:-}" == uv ]]; then
+  printf '%s\\n' "$uv_bin"
+else
+  exec "$real_mise" "\$@"
+fi
+EOF
+chmod +x "$inherited_uv_bin/mise"
+PROOF="$inherited_uv_proof" PATH="${inherited_uv_bin}:$PATH" \
+  XDG_CACHE_HOME="$inherited_uv_cache" bash "$setup_task" >/dev/null
+[[ ! -e "$inherited_uv_proof" ]] || {
+  printf 'mdformat tests: setup invoked inherited uv instead of mise which uv\n' >&2
+  exit 1
+}
+
+first_packages="$($uv_bin pip freeze --python "$environment_python")"
+XDG_CACHE_HOME="$cache_home" bash "$setup_task"
+second_packages="$($uv_bin pip freeze --python "$environment_python")"
+assert_equal "$first_packages" "$second_packages" "repeat setup package set"
+generation_count="$(find "$(dirname -- "$environment_dir")" -maxdepth 1 -type d -name 'generation.*' | wc -l | tr -d ' ')"
+if [[ "$generation_count" != "1" ]]; then
+  printf 'mdformat tests: repeat setup generations:\n' >&2
+  find "$(dirname -- "$environment_dir")" -maxdepth 1 -type d -name 'generation.*' -print >&2
+  exit 1
+fi
+"$environment_dir/bin/mdformat" --check "$sample_markdown"
+
+retention_lock_backup="${test_root}/mdformat-requirements.lock.backup"
+cp "${project_root}/mdformat-requirements.lock" "$retention_lock_backup"
+(
+  trap 'cp "$retention_lock_backup" "${project_root}/mdformat-requirements.lock"' EXIT
+  printf '%s\n' '# content-addressed retention regression' >> "${project_root}/mdformat-requirements.lock"
+  retention_environment="$(XDG_CACHE_HOME="$cache_home" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+  [[ "$retention_environment" != "$environment_dir" ]] || {
+    printf 'mdformat tests: lock identity did not change the cache parent\n' >&2
+    exit 1
+  }
+  XDG_CACHE_HOME="$cache_home" MISE_PROJECT_ROOT="$project_root" bash "$setup_task" >/dev/null
+  [[ -L "$environment_dir" && -L "$retention_environment" ]] || {
+    printf 'mdformat tests: content-addressed parents were not both retained\n' >&2
+    exit 1
+  }
+  assert_no_artifacts "$retention_environment"
+)
+malformed_parent="$(dirname -- "$environment_dir")"
+rm "$environment_dir"
+mkdir "$environment_dir"
+printf '%s\n' 'malformed active directory' > "${environment_dir}/marker"
+XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+[[ -L "$environment_dir" && -x "$environment_dir/bin/mdformat" ]] || {
+  printf 'mdformat tests: malformed active directory was not recovered\n' >&2
+  exit 1
+}
+assert_no_artifacts "$environment_dir"
+
+rm "$environment_dir"
+printf '%s\n' 'malformed active file' > "$environment_dir"
+XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+[[ -L "$environment_dir" && -x "$environment_dir/bin/mdformat" ]] || {
+  printf 'mdformat tests: malformed active file was not recovered\n' >&2
+  exit 1
+}
+assert_no_artifacts "$environment_dir"
+
+unsafe_target="${malformed_parent}/unsafe-target"
+unsafe_outside="${test_root}/unsafe-active-target"
+mkdir -p "$unsafe_outside"
+ln -s "$unsafe_outside" "$unsafe_target"
+rm "$environment_dir"
+ln -s "$(basename -- "$unsafe_target")" "$environment_dir"
+set +e
+unsafe_output="$(XDG_CACHE_HOME="$cache_home" bash "$setup_task" 2>&1)"
+unsafe_status=$?
+set -e
+((unsafe_status != 0)) || {
+  printf 'mdformat tests: unsafe active symlink was not rejected\n%s\n' "$unsafe_output" >&2
+  exit 1
+}
+rm "$environment_dir" "$unsafe_target"
+XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+assert_no_artifacts "$environment_dir"
+
+forged_generation="$(dirname -- "$environment_dir")/generation.forged"
+forged_proof="${test_root}/forged-proof"
+mkdir -p "$forged_generation/bin"
+printf '%s\n' "$MISE_MDFORMAT_ENV_ID" > "$forged_generation/.mdformat-complete"
+printf '%s\n' '#!/usr/bin/env bash' 'printf FORGED-MDFORMAT > "$PROOF"' > "$forged_generation/bin/mdformat"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$forged_generation/bin/python"
+chmod 700 "$forged_generation" "$forged_generation/bin"
+chmod 600 "$forged_generation/.mdformat-complete"
+chmod 700 "$forged_generation/bin/mdformat" "$forged_generation/bin/python"
+ln -s "$(basename -- "$forged_generation")" "${environment_dir}.forged-pointer"
+rm "$environment_dir"
+mv "${environment_dir}.forged-pointer" "$environment_dir"
+PROOF="$forged_proof" XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+[[ ! -e "$forged_proof" ]] || {
+  printf 'mdformat tests: forged completion marker was accepted\n' >&2
+  exit 1
+}
+[[ -x "$environment_dir/bin/mdformat" ]] || {
+  printf 'mdformat tests: forged generation did not rebuild the active environment\n' >&2
+  exit 1
+}
+rm -rf "$forged_generation"
+
+for interrupted_staging in staging.interrupted-one staging.interrupted-two staging.interrupted-three; do
+  mkdir -p "$(dirname -- "$environment_dir")/$interrupted_staging"
+done
+XDG_CACHE_HOME="$cache_home" bash "$setup_task" >/dev/null
+for interrupted_staging in staging.interrupted-one staging.interrupted-two staging.interrupted-three; do
+  [[ ! -e "$(dirname -- "$environment_dir")/$interrupted_staging" ]] || {
+    printf 'mdformat tests: orphan staging generation survived recovery: %s\n' "$interrupted_staging" >&2
+    exit 1
+  }
+done
+
+incomplete_generation="$(readlink "$environment_dir")"
+incomplete_marker="$(dirname -- "$environment_dir")/${incomplete_generation}/.mdformat-complete"
+rm -f "$incomplete_marker"
+mkdir "$(dirname -- "$environment_dir")/generation.incomplete-test"
+XDG_CACHE_HOME="$cache_home" bash "$setup_task"
+[[ -x "$environment_dir/bin/mdformat" ]] || {
+  printf 'mdformat tests: incomplete generation was not rebuilt\n' >&2
+  exit 1
+}
+completed_count="$(find "$(dirname -- "$environment_dir")" -maxdepth 2 -name '.mdformat-complete' | wc -l | tr -d ' ')"
+assert_equal "1" "$completed_count" "completed generation count after rebuild"
+
+if [[ -x /bin/bash ]] && [[ "$(/bin/bash -c 'printf "%s" "${BASH_VERSION%%(*}"')" == 3.2.* ]]; then
+  bash32_cache="${test_root}/bash32-cache"
+  bash32_environment="$(XDG_CACHE_HOME="$bash32_cache" MISE_PROJECT_ROOT="$project_root" /bin/bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+  bash32_lock="${bash32_environment}.lock"
+  mkdir -p "$bash32_cache/mise-mdformat"
+  chmod 700 "$bash32_cache/mise-mdformat"
+  mkdir -p "$(dirname -- "$bash32_lock")"
+  mkdir "$bash32_lock"
+  chmod 700 "$bash32_lock"
+  touch -t 200001010000 "$bash32_lock"
+  set +e
+  bash32_output="$(XDG_CACHE_HOME="$bash32_cache" MISE_PROJECT_ROOT="$project_root" /bin/bash "$setup_task" 2>&1)"
+  bash32_status=$?
+  set -e
+  if [[ "$bash32_status" != "0" ]]; then
+    printf 'mdformat tests: /bin/bash 3.2 setup status: expected 0, got %s\n%s\n' "$bash32_status" "$bash32_output" >&2
+    exit 1
+  fi
+  [[ -x "${bash32_environment}/bin/mdformat" ]] || {
+    printf 'mdformat tests: /bin/bash 3.2 did not publish mdformat\n%s\n' "$bash32_output" >&2
+    exit 1
+  }
+  [[ ! -e "$bash32_lock" ]] || {
+    printf 'mdformat tests: /bin/bash 3.2 left its setup lock behind\n' >&2
+    exit 1
+  }
+  for bash32_stale_lock in "${bash32_lock}.stale."*; do
+    if [[ -e "$bash32_stale_lock" || -L "$bash32_stale_lock" ]]; then
+      printf 'mdformat tests: /bin/bash 3.2 left stale lock artifacts behind\n' >&2
+      exit 1
+    fi
+  done
+fi
+
+corrupt_root="${test_root}/corrupt-repository"
+mkdir -p "$corrupt_root"
+zero_hash="$(printf '%064d' 0)"
+sed -E "s/(--hash=sha256:)[0-9a-f]+/\\1${zero_hash}/g" \
+  "${project_root}/mdformat-requirements.lock" > "${corrupt_root}/mdformat-requirements.lock"
+corrupt_cache="${test_root}/corrupt-cache"
+corrupt_environment="$(XDG_CACHE_HOME="$corrupt_cache" MISE_PROJECT_ROOT="$corrupt_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+[[ "$corrupt_environment" != "$environment_dir" ]] || {
+  printf 'mdformat tests: repository and lock identity did not change the environment path\n' >&2
+  exit 1
+}
+
+hash_count="$(grep -Eo -- '--hash=sha256:[0-9a-f]+' "${corrupt_root}/mdformat-requirements.lock" | wc -l | tr -d ' ')"
+zero_count="$(grep -Eo -- "--hash=sha256:${zero_hash}" "${corrupt_root}/mdformat-requirements.lock" | wc -l | tr -d ' ')"
+[[ "$hash_count" -gt 0 ]] || { printf 'mdformat tests: corrupt lock has no hashes\n' >&2; exit 1; }
+assert_equal "$hash_count" "$zero_count" "all lock hashes corrupted"
+
+set +e
+corrupt_output="$(
+  MISE_PROJECT_ROOT="$corrupt_root" \
+  XDG_CACHE_HOME="$corrupt_cache" \
+  bash "$setup_task" 2>&1
+)"
+corrupt_status=$?
+set -e
+((corrupt_status != 0)) || {
+  printf 'mdformat tests: corrupted lock unexpectedly installed successfully\n%s\n' "$corrupt_output" >&2
+  exit 1
+}
+printf '%s\n' "$corrupt_output" | grep -Eiq 'hash mismatch|hashes? do not match' || {
+  printf 'mdformat tests: failure did not report a hash mismatch\n%s\n' "$corrupt_output" >&2
+  exit 1
+}
+[[ ! -e "$corrupt_environment" ]] || {
+  printf 'mdformat tests: failed setup left an environment that could bypass revalidation\n' >&2
+  exit 1
+}
+assert_no_artifacts "$corrupt_environment"
+
+concurrency_bin="${test_root}/concurrency-bin"
+concurrency_started="${test_root}/concurrency-started"
+concurrency_release="${test_root}/concurrency-release"
+mkdir -p "$concurrency_bin"
+cat > "${concurrency_bin}/uv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == pip && "\${2:-}" == sync ]]; then
+  : > "$concurrency_started"
+  while [[ ! -e "$concurrency_release" ]]; do
+    sleep 0.05
+  done
+fi
+exec "$uv_bin" "\$@"
+EOF
+chmod +x "${concurrency_bin}/uv"
+fake_mise_for_uv "$concurrency_bin" "${concurrency_bin}/uv"
+
+concurrency_cache="${test_root}/concurrency-cache"
+concurrency_environment="$(XDG_CACHE_HOME="$concurrency_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+concurrency_python="${concurrency_environment}/bin/python"
+concurrency_one_packages="${test_root}/concurrency-one-packages"
+concurrency_two_packages="${test_root}/concurrency-two-packages"
+set +e
+(
+  PATH="${concurrency_bin}:$PATH" XDG_CACHE_HOME="$concurrency_cache" bash "$setup_task" > "${test_root}/concurrency-one.out" 2>&1 &&
+    "$uv_bin" pip freeze --python "$concurrency_python" > "$concurrency_one_packages"
+) & concurrency_one=$!
+(
+  PATH="${concurrency_bin}:$PATH" XDG_CACHE_HOME="$concurrency_cache" bash "$setup_task" > "${test_root}/concurrency-two.out" 2>&1 &&
+    "$uv_bin" pip freeze --python "$concurrency_python" > "$concurrency_two_packages"
+) & concurrency_two=$!
+set -e
+
+for _ in {1..100}; do
+  [[ -e "$concurrency_started" ]] && break
+  sleep 0.05
+done
+[[ -e "$concurrency_started" ]] || {
+  kill "$concurrency_one" "$concurrency_two" 2>/dev/null || true
+  wait "$concurrency_one" 2>/dev/null || true
+  wait "$concurrency_two" 2>/dev/null || true
+  printf 'mdformat tests: concurrency setup did not reach package installation\n' >&2
+  exit 1
+}
+sleep 0.2
+: > "$concurrency_release"
+set +e
+wait "$concurrency_one"; concurrency_one_status=$?
+wait "$concurrency_two"; concurrency_two_status=$?
+set -e
+((concurrency_one_status == 0 && concurrency_two_status == 0)) || {
+  printf 'mdformat tests: concurrent setup failed with statuses %s and %s\n' \
+    "$concurrency_one_status" "$concurrency_two_status" >&2
+  cat "${test_root}/concurrency-one.out" "${test_root}/concurrency-two.out" >&2
+  exit 1
+}
+assert_equal "$first_packages" "$(cat "$concurrency_one_packages")" "first concurrent package set"
+assert_equal "$first_packages" "$(cat "$concurrency_two_packages")" "second concurrent package set"
+assert_equal "$first_packages" "$($uv_bin pip freeze --python "$concurrency_python")" "final concurrent package set"
+assert_no_artifacts "$concurrency_environment"
+[[ ! -e "${concurrency_environment}.lock" ]] || {
+  printf 'mdformat tests: concurrent setup left its lock behind\n' >&2
+  exit 1
+}
+for nested_environment in "${concurrency_environment}"/.mdformat.*; do
+  if [[ -e "$nested_environment" || -L "$nested_environment" ]]; then
+    printf 'mdformat tests: concurrent setup nested an environment inside the active environment\n' >&2
+    exit 1
+  fi
+done
+
+reader_bin="${test_root}/reader-bin"
+reader_cache="${test_root}/reader-cache"
+reader_environment="$(XDG_CACHE_HOME="$reader_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+reader_started="${test_root}/reader-started"
+reader_release="${test_root}/reader-release"
+mkdir -p "$reader_bin"
+cat > "${reader_bin}/uv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == pip && "\${2:-}" == sync ]]; then
+  : > "$reader_started"
+  while [[ ! -e "$reader_release" ]]; do
+    sleep 0.05
+  done
+fi
+exec "$uv_bin" "\$@"
+EOF
+chmod +x "${reader_bin}/uv"
+fake_mise_for_uv "$reader_bin" "${reader_bin}/uv"
+(PATH="${reader_bin}:$PATH" XDG_CACHE_HOME="$reader_cache" bash "$setup_task" > "${test_root}/reader.out" 2>&1) & reader_setup=$!
+for _ in {1..100}; do
+  [[ -e "$reader_started" ]] && break
+  sleep 0.05
+done
+[[ -e "$reader_started" ]] || {
+  kill "$reader_setup" 2>/dev/null || true
+  wait "$reader_setup" 2>/dev/null || true
+  printf 'mdformat tests: reader setup did not reach package installation\n' >&2
+  exit 1
+}
+for _ in {1..20}; do
+  if [[ -L "$reader_environment" ]]; then
+    "$reader_environment/bin/mdformat" --check . >/dev/null
+  fi
+  sleep 0.05
+done
+: > "$reader_release"
+wait "$reader_setup"
+[[ -x "$reader_environment/bin/mdformat" ]] || {
+  printf 'mdformat tests: concurrent reader lost the published environment\n' >&2
+  exit 1
+}
+
+cleanup_failure_bin="${test_root}/cleanup-failure-bin"
+cleanup_failure_cache="${test_root}/cleanup-failure-cache"
+cleanup_failure_copy="${test_root}/cleanup-failure-supervisor"
+cleanup_failure_environment="$(XDG_CACHE_HOME="$cleanup_failure_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+mkdir -p "$cleanup_failure_bin"
+copy_setup_scripts "$cleanup_failure_copy"
+cleanup_failure_supervisor="$cleanup_failure_copy/mdformat-supervisor"
+"$python_bin" - "$cleanup_failure_supervisor" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "import uuid\n"
+injection = '''import uuid\n\n_real_rmtree = shutil.rmtree\ndef _injected_rmtree(path, *args, **kwargs):\n    if os.environ.get("MISE_MDFORMAT_TEST_FAIL_RMTREE") == "1" and os.path.basename(str(path)).startswith("staging."):\n        raise OSError("injected Python cleanup failure")\n    return _real_rmtree(path, *args, **kwargs)\nshutil.rmtree = _injected_rmtree\n'''
+if text.count(needle) != 1:
+    raise SystemExit("cleanup injection seam was not found")
+path.write_text(text.replace(needle, injection, 1))
+PY
+cleanup_failure_uv="${cleanup_failure_bin}/uv"
+cleanup_failure_pid="${test_root}/cleanup-failure-uv.pid"
+cat > "$cleanup_failure_uv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == pip && "\${2:-}" == sync ]]; then
+  printf '%s\n' "\$\$" > "$cleanup_failure_pid"
+  exit 1
+fi
+exec "$uv_bin" "\$@"
+EOF
+chmod +x "$cleanup_failure_uv"
+fake_mise_for_uv "$cleanup_failure_bin" "$cleanup_failure_uv"
+set +e
+cleanup_output="$(MISE_MDFORMAT_TEST_FAIL_RMTREE=1 PATH="${cleanup_failure_bin}:$PATH" XDG_CACHE_HOME="$cleanup_failure_cache" bash "$cleanup_failure_copy/mdformat" 2>&1)"
+cleanup_status=$?
+set -e
+((cleanup_status != 0)) || {
+  printf 'mdformat tests: Python cleanup failure was reported as successful\n%s\n' "$cleanup_output" >&2
+  exit 1
+}
+printf '%s\n' "$cleanup_output" | grep -Fq 'remove temporary mdformat generation' || {
+  printf 'mdformat tests: Python cleanup failure lacked context\n%s\n' "$cleanup_output" >&2
+  exit 1
+}
+[[ ! -e "$cleanup_failure_environment.lock" ]] || {
+  printf 'mdformat tests: cleanup failure left its lock behind\n' >&2
+  exit 1
+}
+if [[ -f "$cleanup_failure_pid" ]]; then
+  cleanup_failure_worker_pid="$(cat "$cleanup_failure_pid")"
+  ! kill -0 "$cleanup_failure_worker_pid" 2>/dev/null || {
+    printf 'mdformat tests: cleanup failure left a live installer process\n' >&2
+    exit 1
+  }
+fi
+XDG_CACHE_HOME="$cleanup_failure_cache" bash "$cleanup_failure_copy/mdformat"
+assert_no_artifacts "$cleanup_failure_environment"
+
+stale_lock="${environment_dir}.lock"
+sleep 60 & stale_owner_pid=$!
+mkdir "$stale_lock"
+chmod 700 "$stale_lock"
+printf '{"environment":"stale-test","pid":%s,"started":"%064d"}\n' \
+  "$stale_owner_pid" 0 > "${stale_lock}/owner"
+set +e
+bash "$setup_task" > "${test_root}/stale-lock.out" 2>&1 & stale_waiter=$!
+set -e
+for _ in {1..100}; do
+  if ! kill -0 "$stale_waiter" 2>/dev/null; then break; fi
+  sleep 0.05
+done
+if kill -0 "$stale_waiter" 2>/dev/null; then
+  kill "$stale_waiter" 2>/dev/null || true
+  kill "$stale_owner_pid" 2>/dev/null || true
+  wait "$stale_waiter" 2>/dev/null || true
+  printf 'mdformat tests: stale lock waited on an unrelated live PID\n' >&2
+  exit 1
+fi
+wait "$stale_waiter"
+kill "$stale_owner_pid" 2>/dev/null || true
+
+prelease_root="${test_root}/prelease-repository"
+prelease_cache="${test_root}/prelease-cache"
+prelease_bin="${test_root}/prelease-bin"
+prelease_started="${test_root}/prelease-started"
+prelease_ended="${test_root}/prelease-ended"
+prelease_second_started="${test_root}/prelease-second-started"
+mkdir -p "$prelease_root" "$prelease_bin"
+cp "${project_root}/mdformat-requirements.lock" "$prelease_root/mdformat-requirements.lock"
+cat > "${prelease_bin}/mise" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == which && "\${2:-}" == uv ]]; then
+  printf '%s\\n' "$prelease_bin/uv"
+else
+  exec "$real_mise" "\$@"
+fi
+EOF
+cat > "${prelease_bin}/uv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == pip && "\${2:-}" == sync ]]; then
+  if [[ ! -e "$prelease_started" ]]; then
+    : > "$prelease_started"
+    trap ': > "$prelease_ended"; exit 143' TERM INT
+    while [[ ! -e "$prelease_second_started" ]]; do sleep 0.05; done
+  else
+    [[ -e "$prelease_ended" ]] || { printf 'OVERLAP\\n' >&2; exit 1; }
+    : > "$prelease_second_started"
+  fi
+fi
+exec "$uv_bin" "\$@"
+EOF
+chmod +x "${prelease_bin}/mise" "${prelease_bin}/uv"
+PATH="${prelease_bin}:$PATH" MISE_PROJECT_ROOT="$prelease_root" XDG_CACHE_HOME="$prelease_cache" \
+  bash "$setup_task" > "${test_root}/prelease-first.out" 2>&1 & prelease_first=$!
+for _ in {1..100}; do
+  [[ -e "$prelease_started" ]] && break
+  sleep 0.05
+done
+[[ -e "$prelease_started" ]] || {
+  kill -KILL "$prelease_first" 2>/dev/null || true
+  wait "$prelease_first" 2>/dev/null || true
+  printf 'mdformat tests: delayed worker did not reach the pre-lease window\n' >&2
+  exit 1
+}
+kill -KILL "$prelease_first" 2>/dev/null || true
+sleep 0.2
+set +e
+PATH="${prelease_bin}:$PATH" MISE_PROJECT_ROOT="$prelease_root" XDG_CACHE_HOME="$prelease_cache" \
+  bash "$setup_task" > "${test_root}/prelease-second.out" 2>&1
+prelease_second_status=$?
+set -e
+((prelease_second_status == 0)) || {
+  printf 'mdformat tests: recovery did not reclaim the dead supervisor lock\n' >&2
+  cat "${test_root}/prelease-second.out" >&2
+  exit 1
+}
+[[ -e "$prelease_ended" && -e "$prelease_second_started" ]] || {
+  printf 'mdformat tests: later recovery did not wait for the dead installer group\n' >&2
+  cat "${test_root}/prelease-second.out" >&2
+  exit 1
+}
+rm -rf "$prelease_cache"
+
+sigkill_bin="${test_root}/sigkill-bin"
+sigkill_cache="${test_root}/sigkill-cache"
+sigkill_environment="$(XDG_CACHE_HOME="$sigkill_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+sigkill_started="${test_root}/sigkill-started"
+sigkill_ended="${test_root}/sigkill-ended"
+sigkill_second_started="${test_root}/sigkill-second-started"
+sigkill_release="${test_root}/sigkill-release"
+mkdir -p "$sigkill_bin"
+cat > "${sigkill_bin}/uv" <<EOF
+#!$python_bin
+import os
+import signal
+import sys
+import time
+
+started = "$sigkill_started"
+ended = "$sigkill_ended"
+second_started = "$sigkill_second_started"
+release = "$sigkill_release"
+real_uv = "$uv_bin"
+command = sys.argv[1:]
+if command[:2] == ["pip", "sync"]:
+    if not os.path.exists(started):
+        # os.setsid() models the macOS shell boundary without relying on a
+        # platform-specific setsid executable. The launcher must still own
+        # and reap this direct child after the supervisor is SIGKILLed.
+        os.setsid()
+        open(started, "w").close()
+
+        def stop(_signum, _frame):
+            open(ended, "w").close()
+            os._exit(143)
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        while not os.path.exists(release):
+            time.sleep(0.05)
+    else:
+        open(second_started, "w").close()
+        if not os.path.exists(ended):
+            print("OVERLAP", file=sys.stderr)
+            raise SystemExit(1)
+os.execv(real_uv, [real_uv, *command])
+EOF
+chmod +x "${sigkill_bin}/uv"
+fake_mise_for_uv "$sigkill_bin" "${sigkill_bin}/uv"
+PATH="${sigkill_bin}:$PATH" XDG_CACHE_HOME="$sigkill_cache" bash "$setup_task" > "${test_root}/sigkill-first.out" 2>&1 & sigkill_first=$!
+for _ in {1..100}; do
+  [[ -e "$sigkill_started" ]] && break
+  sleep 0.05
+done
+[[ -e "$sigkill_started" ]] || {
+  kill "$sigkill_first" 2>/dev/null || true
+  wait "$sigkill_first" 2>/dev/null || true
+  printf 'mdformat tests: SIGKILL setup did not reach package installation\n' >&2
+  exit 1
+}
+kill -KILL "$sigkill_first" 2>/dev/null || true
+sleep 0.2
+PATH="${sigkill_bin}:$PATH" XDG_CACHE_HOME="$sigkill_cache" bash "$setup_task" > "${test_root}/sigkill-second.out" 2>&1 & sigkill_second=$!
+for _ in {1..100}; do
+  [[ -e "$sigkill_ended" ]] && break
+  sleep 0.05
+done
+[[ -e "$sigkill_ended" ]] || {
+  kill "$sigkill_second" 2>/dev/null || true
+  wait "$sigkill_second" 2>/dev/null || true
+  : > "$sigkill_release"
+  printf 'mdformat tests: recovery left an orphan installer running\n' >&2
+  exit 1
+}
+[[ ! -e "$sigkill_second_started" ]] || {
+  kill "$sigkill_second" 2>/dev/null || true
+  wait "$sigkill_second" 2>/dev/null || true
+  printf 'mdformat tests: recovery overlapped an orphan installer\n' >&2
+  exit 1
+}
+: > "$sigkill_release"
+wait "$sigkill_second"
+[[ -x "$sigkill_environment/bin/mdformat" ]] || {
+  printf 'mdformat tests: SIGKILL recovery did not publish an environment\n' >&2
+  exit 1
+}
+
+sigterm_bin="${test_root}/sigterm-bin"
+sigterm_cache="${test_root}/sigterm-cache"
+sigterm_environment="$(XDG_CACHE_HOME="$sigterm_cache" MISE_PROJECT_ROOT="$project_root" bash -c 'source "$1"; printf "%s" "$MISE_MDFORMAT_ENV_DIR"' _ "$environment_script")"
+sigterm_started="${test_root}/sigterm-started"
+sigterm_release="${test_root}/sigterm-release"
+mkdir -p "$sigterm_bin"
+cat > "${sigterm_bin}/uv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == pip && "\${2:-}" == sync ]]; then
+  : > "$sigterm_started"
+  while [[ ! -e "$sigterm_release" ]]; do
+    sleep 0.05
+  done
+  exit 1
+fi
+exec "$uv_bin" "\$@"
+EOF
+chmod +x "${sigterm_bin}/uv"
+fake_mise_for_uv "$sigterm_bin" "${sigterm_bin}/uv"
+set +e
+(PATH="${sigterm_bin}:$PATH" XDG_CACHE_HOME="$sigterm_cache" bash "$setup_task" > "${test_root}/sigterm.out" 2>&1) & sigterm_pid=$!
+set -e
+for _ in {1..100}; do
+  [[ -e "$sigterm_started" ]] && break
+  sleep 0.05
+done
+[[ -e "$sigterm_started" ]] || {
+  kill "$sigterm_pid" 2>/dev/null || true
+  wait "$sigterm_pid" 2>/dev/null || true
+  printf 'mdformat tests: SIGTERM setup did not reach package installation\n' >&2
+  exit 1
+}
+kill -TERM "$sigterm_pid"
+: > "$sigterm_release"
+set +e
+wait "$sigterm_pid"
+sigterm_status=$?
+set -e
+((sigterm_status != 0)) || {
+  printf 'mdformat tests: SIGTERM setup unexpectedly succeeded\n' >&2
+  exit 1
+}
+[[ ! -e "$sigterm_environment" && ! -L "$sigterm_environment" ]] || {
+  printf 'mdformat tests: SIGTERM left a partial published environment\n' >&2
+  exit 1
+}
+assert_no_artifacts "$sigterm_environment"
+[[ ! -e "${sigterm_environment}.lock" ]] || {
+  printf 'mdformat tests: SIGTERM left its lock behind\n' >&2
+  exit 1
+}
+XDG_CACHE_HOME="$sigterm_cache" bash "$setup_task"
+
+printf 'mdformat tests passed\n'

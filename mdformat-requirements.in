@@ -1,0 +1,4 @@
+# Direct package pins for the isolated mdformat tool environment.
+mdformat==1.0.0
+mdformat-frontmatter==2.1.2
+mdformat-gfm==1.0.0

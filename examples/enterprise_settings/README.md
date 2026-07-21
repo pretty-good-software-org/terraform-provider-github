@@ -106,20 +106,22 @@ resource "github_enterprise_actions_workflow_permissions" "advanced" {
 ## Security Recommendations
 
 1. Use `"read"` workflow permissions by default
-2. Disable pull request review approvals for security
-3. Use `"selected"` actions policy to limit which actions can run
-4. Store tokens securely using environment variables
+1. Disable pull request review approvals for security
+1. Use `"selected"` actions policy to limit which actions can run
+1. Store tokens securely using environment variables
 
 ## Configuration Reference
 
 ### Actions Settings
 
 - **`actions_enabled_organizations`**: Controls which organizations can run GitHub Actions
+
   - `"all"` - All organizations in the enterprise
   - `"none"` - No organizations
   - `"selected"` - Only specified organizations (requires additional configuration)
 
 - **`actions_allowed_actions`**: Controls which actions can be run
+
   - `"all"` - All actions and reusable workflows
   - `"local_only"` - Only actions and workflows in the same repository/organization
   - `"selected"` - Only specified actions (requires additional configuration)
@@ -133,19 +135,21 @@ When `actions_allowed_actions` is set to `"selected"`, you can specify:
 ### Workflow Settings
 
 - **`default_workflow_permissions`**: Default permissions for the GITHUB_TOKEN
+
   - `"read"` - Read-only permissions (recommended for security)
   - `"write"` - Read and write permissions
 
 - **`can_approve_pull_request_reviews`**: Whether GitHub Actions can approve pull request reviews
-  - `true` - Actions can approve PR reviews  
+
+  - `true` - Actions can approve PR reviews
   - `false` - Actions cannot approve PR reviews (recommended for security)
 
 ## Security Considerations
 
 1. **Workflow Permissions**: Use `"read"` permissions by default and grant `"write"` only when necessary
-2. **PR Approvals**: Disable `can_approve_pull_request_reviews` to prevent automated approval bypasses
-3. **Action Restrictions**: Use `"selected"` for `actions_allowed_actions` to limit which actions can run
-4. **Token Security**: Store your GitHub token securely and use environment variables
+1. **PR Approvals**: Disable `can_approve_pull_request_reviews` to prevent automated approval bypasses
+1. **Action Restrictions**: Use `"selected"` for `actions_allowed_actions` to limit which actions can run
+1. **Token Security**: Store your GitHub token securely and use environment variables
 
 ## Limitations
 
@@ -164,13 +168,13 @@ terraform import github_enterprise_settings.example my-enterprise
 ### Common Issues
 
 1. **Authentication**: Ensure your token has enterprise admin permissions
-2. **Enterprise Access**: Verify you have access to the specified enterprise
-3. **API Limits**: GitHub API has rate limits; consider adding delays for large configurations
+1. **Enterprise Access**: Verify you have access to the specified enterprise
+1. **API Limits**: GitHub API has rate limits; consider adding delays for large configurations
 
 ### Verification
 
 After applying, verify settings in the GitHub Enterprise dashboard:
 
 1. Go to your enterprise settings
-2. Navigate to "Policies" > "Actions"  
-3. Check that the configured settings match your Terraform configuration
+1. Navigate to "Policies" > "Actions"
+1. Check that the configured settings match your Terraform configuration

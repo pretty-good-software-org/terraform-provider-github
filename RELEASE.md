@@ -5,8 +5,9 @@ The release process uses GitHub Actions and [`goreleaser`](https://github.com/go
 The release flow is as follows:
 
 [!IMPORTANT]
+
 > In you're planning on releasing a major version, please ensure you've completed the following tasks:
-> 
+>
 > - Read Hashicorp guidance on [incrementing the major version](https://developer.hashicorp.com/terraform/plugin/best-practices/versioning#example-major-number-increments).
 > - Check if there are any outstanding [PRs with breaking changes](https://github.com/integrations/terraform-provider-github/issues?q=state%3Aopen%20label%3A%22Type%3A%20Breaking%20change%22) that could be included in the release.
 > - Check that all deprecations have been addressed and removed from the codebase.

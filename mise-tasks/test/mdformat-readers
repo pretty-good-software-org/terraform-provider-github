@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+#MISE description="Test concurrent formatter readers during environment publication"
+set -euo pipefail
+
+readonly project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
+readonly consumer_required_files=(
+  .mise.toml
+  mise.lock
+  mdformat-requirements.lock
+  mise-tasks/check/markdown-format
+  mise-tasks/check/mdformat-version
+  mise-tasks/test/mdformat-readers
+)
+readonly consumer_optional_files=(.mise.ci.toml .mise.development.toml .miserc.toml)
+readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/mdformat-readers.XXXXXX")"
+cleanup() {
+  local status=$? cleanup_status=0
+  rm -rf "$test_root" || {
+    printf 'mdformat reader tests: failed to remove test directory: %s\n' "$test_root" >&2
+    cleanup_status=1
+  }
+  if ((status == 0 && cleanup_status)); then
+    status=$cleanup_status
+  fi
+  trap - EXIT
+  exit "$status"
+}
+trap cleanup EXIT
+
+run_reader() {
+  local task="$1" output="$2"
+  MISE_ENV=ci XDG_CACHE_HOME="$test_root/cache" mise run "$task" > "$output" 2>&1
+}
+
+copy_required_file() {
+  local source="$1" destination="$2"
+  [[ -f "$source" ]] || {
+    printf 'mdformat reader tests: required fixture file is missing: %s\n' "$source" >&2
+    return 1
+  }
+  mkdir -p "$(dirname -- "$destination")"
+  cp "$source" "$destination"
+}
+
+copy_optional_file() {
+  local source="$1" destination="$2"
+  [[ -f "$source" ]] || return 0
+  mkdir -p "$(dirname -- "$destination")"
+  cp "$source" "$destination"
+}
+
+copy_setup_files() {
+  local source_root="$1" destination_root="$2" setup_entry setup_name
+  mkdir -p "$destination_root/mise-tasks/setup"
+  for setup_entry in "$source_root/mise-tasks/setup/"*; do
+    [[ -f "$setup_entry" ]] || continue
+    setup_name="${setup_entry##*/}"
+    cp "$setup_entry" "$destination_root/mise-tasks/setup/$setup_name"
+  done
+}
+
+prepare_consumer() {
+  local source_root="$1" consumer_fixture="$2" consumer_root="$3" file
+  mkdir -p "$consumer_root/mise-tasks/check" "$consumer_root/mise-tasks/setup" \
+    "$consumer_root/mise-tasks/test" "$consumer_root/mise-tasks/lint"
+
+  for file in "${consumer_required_files[@]}"; do
+    copy_required_file "$source_root/$file" "$consumer_root/$file"
+  done
+  for file in "${consumer_optional_files[@]}"; do
+    copy_optional_file "$source_root/$file" "$consumer_root/$file"
+  done
+  copy_setup_files "$source_root" "$consumer_root"
+
+  for setup_entry in "$consumer_root/mise-tasks/setup/"*; do
+    [[ -f "$setup_entry" ]] || {
+      printf 'mdformat reader tests: consumer setup copied a non-file entry: %s\n' "$setup_entry" >&2
+      return 1
+    }
+  done
+  copy_required_file "$consumer_fixture/mise-tasks/lint/default" \
+    "$consumer_root/mise-tasks/lint/default"
+}
+
+set +e
+run_reader check:markdown-format "$test_root/markdown-format.out" & markdown_pid=$!
+run_reader check:mdformat-version "$test_root/mdformat-version.out" & version_pid=$!
+wait "$markdown_pid"; markdown_status=$?
+wait "$version_pid"; version_status=$?
+set -e
+
+printf 'mdformat reader tests: markdown-format=%s mdformat-version=%s\n' \
+  "$markdown_status" "$version_status"
+((markdown_status == 0 && version_status == 0)) || {
+  printf '%s\n' '--- markdown format output ---' >&2
+  cat "$test_root/markdown-format.out" >&2
+  printf '%s\n' '--- mdformat version output ---' >&2
+  cat "$test_root/mdformat-version.out" >&2
+  exit 1
+}
+
+! grep -Hliq -- 'No such file or directory\|UNLOCKED-MDFORMAT\|Traceback' \
+  "$test_root/markdown-format.out" "$test_root/mdformat-version.out" || {
+  printf 'mdformat reader tests: concurrent reader observed an invalid publication\n' >&2
+  grep -Hlin -- 'No such file or directory\|UNLOCKED-MDFORMAT\|Traceback' \
+    "$test_root/markdown-format.out" "$test_root/mdformat-version.out" >&2
+  exit 1
+}
+
+if [[ "${MDFORMAT_READER_SKIP_FIXTURE:-0}" != 1 ]]; then
+  consumer_root="$test_root/consumer"
+  consumer_fixture="${MDFORMAT_READER_FIXTURE_SOURCE:-$project_root/test/fixtures/mdformat-reader-consumer}"
+  prepare_consumer "$project_root" "$consumer_fixture" "$consumer_root"
+
+  no_ci_source="$test_root/no-ci-source"
+  for file in "${consumer_required_files[@]}"; do
+    copy_required_file "$project_root/$file" "$no_ci_source/$file"
+  done
+  copy_setup_files "$project_root" "$no_ci_source"
+  no_ci_consumer="$test_root/no-ci-consumer"
+  prepare_consumer "$no_ci_source" "$consumer_fixture" "$no_ci_consumer"
+  [[ ! -e "$no_ci_consumer/.mise.ci.toml" ]] || {
+    printf 'mdformat reader tests: no-ci fixture unexpectedly copied .mise.ci.toml\n' >&2
+    exit 1
+  }
+
+  consumer_proof="$test_root/consumer-lint-proof"
+  set +e
+  (
+    cd "$consumer_root"
+    MISE_ENV=ci MISE_PROJECT_ROOT="$consumer_root" MISE_TRUSTED_CONFIG_PATHS="$consumer_root" \
+      XDG_CACHE_HOME="$test_root/consumer-cache" MDFORMAT_READER_LINT_PROOF="$consumer_proof" \
+      MDFORMAT_READER_FIXTURE_SOURCE="$consumer_fixture" MDFORMAT_READER_SKIP_FIXTURE=1 \
+      mise run test:mdformat-readers
+  ) > "$test_root/consumer.out" 2>&1
+  consumer_status=$?
+  set -e
+  ((consumer_status == 0)) || {
+    printf 'mdformat reader tests: consumer fixture status=%s\n' "$consumer_status" >&2
+    cat "$test_root/consumer.out" >&2
+    exit 1
+  }
+  [[ ! -e "$consumer_proof" ]] || {
+    printf 'mdformat reader tests: consumer aggregate lint was invoked\n' >&2
+    cat "$test_root/consumer.out" >&2
+    exit 1
+  }
+fi
+
+printf 'mdformat concurrent reader tests passed\n'
