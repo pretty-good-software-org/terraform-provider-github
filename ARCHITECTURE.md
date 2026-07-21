@@ -25,7 +25,7 @@ This document serves as a guide for contributors implementing new features and r
   - [Test Modes](#test-modes)
   - [Running Tests](#running-tests)
   - [Debugging Tests](#debugging-tests)
-- [Gotchas \& Known Issues](#gotchas--known-issues)
+- [Gotchas & Known Issues](#gotchas--known-issues)
   - [Deprecated Resources](#deprecated-resources)
   - [Deprecated Data Sources](#deprecated-data-sources)
   - [Known Limitations](#known-limitations)
@@ -34,7 +34,7 @@ This document serves as a guide for contributors implementing new features and r
   - [Common Utilities](#common-utilities)
   - [Naming Conventions](#naming-conventions)
 
----
+______________________________________________________________________
 
 ## Module Map
 
@@ -59,7 +59,7 @@ terraform-provider-github/
 └── CONTRIBUTING.md              # How to contribute
 ```
 
----
+______________________________________________________________________
 
 ## Core Principles
 
@@ -145,7 +145,7 @@ _, _, err := client.Git.CreateRef(ctx, owner, repo, ref)
 exec.Command("git", "push", "origin", "main")
 ```
 
----
+______________________________________________________________________
 
 ## Resource Design
 
@@ -272,7 +272,7 @@ id, err := buildID(escapeIDPart(part1), part2)
 
 > **Note:** The legacy functions `buildTwoPartID` and `buildThreePartID`, are deprecated. Use `buildID` instead.
 
----
+______________________________________________________________________
 
 ## Implementation Patterns
 
@@ -281,9 +281,9 @@ id, err := buildID(escapeIDPart(part1), part2)
 The provider resolves credentials using the following fallback chain (first match wins):
 
 1. **Token**: `token` attribute or `GITHUB_TOKEN` env var
-2. **GitHub App**: `app_auth` block with `id`, `installation_id`, and `pem_file`
-3. **GitHub CLI**: Falls back to `gh auth token` if neither token nor app_auth is set. This method will be deprecated in a future release, so users should not rely on it for long-term authentication.
-4. **Anonymous**: Read-only access when no credentials are available
+1. **GitHub App**: `app_auth` block with `id`, `installation_id`, and `pem_file`
+1. **GitHub CLI**: Falls back to `gh auth token` if neither token nor app_auth is set. This method will be deprecated in a future release, so users should not rely on it for long-term authentication.
+1. **Anonymous**: Read-only access when no credentials are available
 
 All authentication configuration is handled in `config.go`. See the [Explicit Authentication Configuration](./DECISIONS.md#explicit-authentication-configuration) decision for design rationale.
 
@@ -441,7 +441,7 @@ func resourceExampleCreate(ctx context.Context, d *schema.ResourceData, m any) d
 
 **Note:** Migration from `log` to `tflog` is in progress. New code should use `tflog`.
 
----
+______________________________________________________________________
 
 ## Testing
 
@@ -560,7 +560,7 @@ make sweep
 TF_LOG=DEBUG make testacc T=TestAccGithubExample
 ```
 
----
+______________________________________________________________________
 
 ## Gotchas & Known Issues
 
@@ -600,7 +600,7 @@ The following resources are deprecated and will be removed in future versions:
 
 - **EMU with SSO**: Odd behavior with user tokens when using Enterprise Managed Users (`resource_github_enterprise_organization.go:122`)
 
----
+______________________________________________________________________
 
 ## Appendix
 

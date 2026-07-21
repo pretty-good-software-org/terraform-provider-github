@@ -1,0 +1,5 @@
+# CI profile — additional Go tools needed only in CI
+[tools]
+"go:github.com/fzipp/gocyclo/cmd/gocyclo" = "0.6.0"
+"go:github.com/uudashr/gocognit/cmd/gocognit" = "1.2.1"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.6.0"

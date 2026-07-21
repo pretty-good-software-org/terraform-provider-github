@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Regression fixture: consumer lint must not run here"
+set -euo pipefail
+
+: "${MDFORMAT_READER_LINT_PROOF:?MDFORMAT_READER_LINT_PROOF must be set by the fixture test}"
+: > "$MDFORMAT_READER_LINT_PROOF"
+printf '%s\n' 'consumer lint:default was invoked unexpectedly' >&2
+exit 97

@@ -1,0 +1,20 @@
+pre-commit:
+  commands:
+    gofmt:
+      glob: "**/*.go"
+      run: test -z "$(gofmt -l {staged_files})"
+      fail_text: "gofmt found unformatted files"
+
+pre-push:
+  commands:
+    lint:
+      run: mise run lint:go
+      fail_text: "Go lint failed"
+
+    test:
+      run: mise run test:default
+      fail_text: "provider tests failed"
+
+    vulnerability:
+      run: mise run lint:vulncheck
+      fail_text: "known vulnerabilities found"

@@ -32,6 +32,7 @@ terraform-provider-github
 
 # Generated temporary files
 .golangci.new.yml
+__pycache__/
 
 # Test exclusions
 !command/test-fixtures/**/*.tfstate

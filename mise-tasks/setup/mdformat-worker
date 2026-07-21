@@ -1,0 +1,28 @@
+#!/bin/bash
+# Run the hash-locked installation inside the supervisor-created process group.
+set -euo pipefail
+
+readonly uv_bin="$1"
+readonly temporary_environment_dir="$2"
+readonly python_bin="$3"
+readonly requirements_lock="$4"
+
+"$uv_bin" venv \
+  --allow-existing \
+  --relocatable \
+  --python "$python_bin" \
+  "$temporary_environment_dir" || {
+  printf 'mdformat setup: failed to create temporary Python environment\n' >&2
+  exit 1
+}
+
+# Nothing needs to run after the package sync. Replacing this shell with uv
+# makes the installer the launcher's direct child, even when a macOS shell
+# gives an external command a different process group or session.
+exec "$uv_bin" pip sync \
+  --require-hashes \
+  --python "$temporary_environment_dir/bin/python" \
+  "$requirements_lock" || {
+  printf 'mdformat setup: hash-locked requirements installation failed\n' >&2
+  exit 1
+}

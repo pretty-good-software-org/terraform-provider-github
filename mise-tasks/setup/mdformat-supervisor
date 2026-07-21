@@ -1,0 +1,959 @@
+#!/usr/bin/env python3
+"""Own the mdformat cache lease and installer lifecycle.
+
+The shell task execs this process, so this PID is the lock owner for its whole
+lifetime.  A forked installer is held behind a pipe until its lease record is
+committed; an owner death before release cannot leave an installer running.
+"""
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+STALE_LOCK_SECONDS = 60
+HANDSHAKE_WAIT_SECONDS = 5
+OWNER_EXIT_CONFIRMATION_ATTEMPTS = 3
+POLL_SECONDS = 0.1
+PROCESS_STOP_SECONDS = 5
+COMPLETION_MARKER = ".mdformat-complete"
+MANIFEST_NAME = ".mdformat-manifest.json"
+WORKER_RECORD = "worker"
+WORKER_INTENT = "worker-intent"
+WORKER_ABORTED = "worker-aborted"
+OWNER_RECORD = "owner"
+
+
+class SetupError(RuntimeError):
+    """An mdformat setup operation failed with contextual information."""
+
+
+class Supervisor:
+    def __init__(self, args: list[str]) -> None:
+        (
+            project_root,
+            environment_parent,
+            environment_dir,
+            lock_dir,
+            self.environment_id,
+            python_bin,
+            uv_bin,
+            requirements_lock,
+            worker_script,
+            bash_bin,
+        ) = args
+        self.project_root = Path(project_root).resolve()
+        # XDG_CACHE_HOME is canonicalized by mdformat-env, but the managed
+        # mise-mdformat root is deliberately kept lexical until lstat rejects
+        # a redirect. Resolving this path first would silently follow that root.
+        self.environment_parent = Path(os.path.abspath(environment_parent))
+        self.environment_dir = Path(os.path.abspath(environment_dir))
+        self.lock_dir = Path(os.path.abspath(lock_dir))
+        self.python_bin = Path(python_bin).resolve()
+        self.uv_bin = Path(uv_bin).resolve()
+        self.requirements_lock = Path(requirements_lock).resolve()
+        self.worker_script = Path(worker_script).resolve()
+        self.bash_bin = Path(bash_bin).resolve()
+        cache_parts = self.environment_parent.parts
+        cache_indexes = [index for index, part in enumerate(cache_parts) if part == "mise-mdformat"]
+        if not cache_indexes:
+            raise SetupError(f"mdformat cache path has no mise-mdformat root: {self.environment_parent}")
+        self.cache_root = Path(*cache_parts[: cache_indexes[-1] + 1])
+        # Keep the active pointer and lock as directory entries. resolve() would
+        # follow an existing active symlink and destroy publication semantics.
+        self.lock_owned = False
+        self.staging: Path | None = None
+        self.quarantine: Path | None = None
+        self.active_malformed = False
+        self.worker_pid: int | None = None
+        self.worker_started = ""
+        self.worker_read_fd: int | None = None
+        self.stop_requested = False
+        self.expected_packages = self._read_expected_packages()
+        self.lock_id = self._sha256_file(self.requirements_lock)
+        self.tool_provenance_id = os.environ.get("MISE_MDFORMAT_TOOL_ID", "")
+        if not self.tool_provenance_id:
+            raise SetupError("Mise tool provenance identity is missing")
+
+    @staticmethod
+    def _ps_path() -> str:
+        return "/bin/ps" if os.path.exists("/bin/ps") else "ps"
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as error:
+            raise SetupError(f"hash requirements lock {path}: {error}") from error
+        return digest.hexdigest()
+
+    @staticmethod
+    def _sha256_bytes(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _normalize_package(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    def _read_expected_packages(self) -> list[dict[str, str]]:
+        packages: list[dict[str, str]] = []
+        try:
+            lines = self.requirements_lock.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            raise SetupError(f"read requirements lock {self.requirements_lock}: {error}") from error
+        for line in lines:
+            match = re.match(r"^([A-Za-z0-9_.-]+)==(\S+)", line)
+            if match:
+                packages.append(
+                    {"name": self._normalize_package(match.group(1)), "version": match.group(2)}
+                )
+        if not packages:
+            raise SetupError(f"requirements lock contains no exact packages: {self.requirements_lock}")
+        return sorted(packages, key=lambda package: package["name"])
+
+    @staticmethod
+    def _lstat(path: Path) -> os.stat_result:
+        try:
+            return path.lstat()
+        except OSError as error:
+            raise SetupError(f"inspect cache path {path}: {error}") from error
+
+    @staticmethod
+    def _assert_owner(path: Path, metadata: os.stat_result) -> None:
+        if metadata.st_uid != os.getuid():
+            raise SetupError(f"cache path is not owned by the current UID: {path}")
+
+    @classmethod
+    def _assert_directory_metadata(cls, path: Path, metadata: os.stat_result) -> None:
+        cls._assert_owner(path, metadata)
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise SetupError(f"cache path is not a real directory: {path}")
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise SetupError(f"cache directory permissions must be 0700: {path}")
+
+    @classmethod
+    def _assert_directory(cls, path: Path) -> None:
+        cls._assert_directory_metadata(path, cls._lstat(path))
+
+    @classmethod
+    def _assert_file(cls, path: Path, executable: bool | None = None) -> os.stat_result:
+        metadata = cls._lstat(path)
+        cls._assert_owner(path, metadata)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SetupError(f"cache file is not a regular file: {path}")
+        mode = stat.S_IMODE(metadata.st_mode)
+        expected = 0o700 if executable else 0o600
+        if executable is not None and mode != expected:
+            raise SetupError(f"cache file permissions must be {expected:04o}: {path}")
+        return metadata
+
+    @classmethod
+    def _ensure_directory(cls, path: Path) -> None:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            metadata = cls._lstat(path)
+            cls._assert_owner(path, metadata)
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise SetupError(f"cache path is not a real directory: {path}")
+            os.chmod(path, 0o700)
+            cls._assert_directory(path)
+            return
+        except OSError as error:
+            raise SetupError(f"create cache directory {path}: {error}") from error
+        cls._assert_directory(path)
+
+    @classmethod
+    def _write_bytes(cls, path: Path, data: bytes, mode: int = 0o600) -> None:
+        temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            descriptor = os.open(temporary, flags, mode)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, mode)
+        except OSError as error:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise SetupError(f"write cache record {path}: {error}") from error
+
+    @classmethod
+    def _write_json(cls, path: Path, value: object) -> None:
+        data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        cls._write_bytes(path, data)
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, object]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise SetupError(f"read cache record {path}: {error}") from error
+        if not isinstance(value, dict):
+            raise SetupError(f"cache record is not an object: {path}")
+        return value
+
+    @classmethod
+    def _remove_path(cls, path: Path, description: str) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise SetupError(f"inspect {description} {path}: {error}") from error
+        cls._assert_owner(path, metadata)
+        try:
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as error:
+            raise SetupError(f"remove {description} {path}: {error}") from error
+
+    @classmethod
+    def _process_start_identity(cls, pid: int) -> str | None:
+        try:
+            output = subprocess.check_output(
+                [cls._ps_path(), "-p", str(pid), "-o", "lstart="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        if not output:
+            return None
+        normalized = " ".join(output.split()) + "\n"
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _process_matches(cls, pid: int, started: str) -> bool:
+        if not started or cls._process_start_identity(pid) != started:
+            return False
+        try:
+            output = subprocess.check_output(
+                [cls._ps_path(), "-p", str(pid), "-o", "stat="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return False
+        return bool(output) and not output.startswith("Z")
+
+    def _owner_record(self) -> dict[str, object]:
+        started = self._process_start_identity(os.getpid())
+        if not started:
+            raise SetupError("identify setup supervisor process")
+        return {"pid": os.getpid(), "started": started, "environment": str(self.environment_id)}
+
+    def _record_matches_process(self, record: dict[str, object], prefix: str) -> bool:
+        pid = record.get("pid")
+        started = record.get("started")
+        if not isinstance(pid, int) or not isinstance(started, str):
+            raise SetupError(f"malformed {prefix} process record")
+        return self._process_matches(pid, started)
+
+    def _read_record_if_present(self, name: str) -> dict[str, object] | None:
+        path = self.lock_dir / name
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise SetupError(f"inspect cache record {path}: {error}") from error
+        self._assert_owner(path, metadata)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SetupError(f"cache record is not a regular file: {path}")
+        try:
+            os.chmod(path, 0o600)
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as error:
+            raise SetupError(f"read cache record {path}: {error}") from error
+        if not isinstance(value, dict):
+            raise SetupError(f"cache record is not an object: {path}")
+        return value
+
+    def _terminate_recorded_worker(self, record: dict[str, object]) -> None:
+        """Stop the recorded launcher without ever acting on a reused PID.
+
+        The launcher is the only process recovered by another supervisor. It
+        owns the installer child, terminates the groups that child actually
+        joined, and waits for that child. A stale supervisor must therefore
+        signal only the launcher's PID after checking its start identity. A
+        numeric process-group ID is not an identity: after the launcher exits,
+        that number may belong to an unrelated process group.
+        """
+        pid = record.get("pid")
+        started = record.get("started")
+        if not isinstance(pid, int) or not isinstance(started, str):
+            raise SetupError("malformed installer launcher record")
+
+        if self._process_matches(pid, started):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                raise SetupError(f"terminate installer launcher {pid}: {error}") from error
+
+        deadline = time.monotonic() + PROCESS_STOP_SECONDS
+        while time.monotonic() < deadline:
+            if not self._process_matches(pid, started):
+                return
+            time.sleep(POLL_SECONDS)
+        if self._process_matches(pid, started):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                raise SetupError(f"kill installer launcher {pid}: {error}") from error
+
+        deadline = time.monotonic() + PROCESS_STOP_SECONDS
+        while time.monotonic() < deadline:
+            if not self._process_matches(pid, started):
+                return
+            time.sleep(POLL_SECONDS)
+        raise SetupError(f"installer launcher did not stop: {pid}")
+
+    def _wait_for_prelease_abort(self) -> None:
+        deadline = time.monotonic() + HANDSHAKE_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            worker = self._read_record_if_present(WORKER_RECORD)
+            if worker is not None:
+                self._terminate_recorded_worker(worker)
+                return
+            if (self.lock_dir / WORKER_ABORTED).exists():
+                return
+            time.sleep(POLL_SECONDS)
+        # The child is permitted to exist only behind the pipe and cannot have
+        # started the installer. Reclaiming here cannot overlap installation.
+
+    @staticmethod
+    def ownerless_lock_is_reclaimable(lock_age: int) -> bool:
+        return lock_age > STALE_LOCK_SECONDS
+
+    def owner_is_confirmed_dead(self, pid: int, started: str) -> bool:
+        # `ps` can fail transiently under load. Require consecutive misses so
+        # one failed lookup cannot steal a live owner's lock and delete its
+        # staging generation. A genuinely dead owner is recovered in under a
+        # second, preserving crash-resume behavior.
+        for attempt in range(OWNER_EXIT_CONFIRMATION_ATTEMPTS):
+            if self._process_matches(pid, started):
+                return False
+            if attempt + 1 < OWNER_EXIT_CONFIRMATION_ATTEMPTS:
+                time.sleep(POLL_SECONDS)
+        return True
+
+    def _recover_stale_lock(self) -> bool:
+        try:
+            lock_metadata = self.lock_dir.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            raise SetupError(f"inspect setup lock {self.lock_dir}: {error}") from error
+        self._assert_directory_metadata(self.lock_dir, lock_metadata)
+        lock_age = max(0, int(time.time() - lock_metadata.st_mtime))
+        owner = self._read_record_if_present(OWNER_RECORD)
+        if owner is None:
+            if not self.lock_dir.exists():
+                return True
+            if self.ownerless_lock_is_reclaimable(lock_age):
+                return self._move_stale_lock()
+            return False
+        owner_pid = owner.get("pid")
+        owner_started = owner.get("started")
+        if not isinstance(owner_pid, int) or not isinstance(owner_started, str):
+            raise SetupError(f"malformed setup lock owner: {self.lock_dir / OWNER_RECORD}")
+        if not self.owner_is_confirmed_dead(owner_pid, owner_started):
+            return False
+
+        worker = self._read_record_if_present(WORKER_RECORD)
+        if worker is not None:
+            self._terminate_recorded_worker(worker)
+        elif (self.lock_dir / WORKER_INTENT).exists():
+            self._wait_for_prelease_abort()
+        return self._move_stale_lock()
+
+    def _move_stale_lock(self) -> bool:
+        destination = self.lock_dir.with_name(f"{self.lock_dir.name}.stale.{os.getpid()}.{uuid.uuid4().hex}")
+        try:
+            os.replace(self.lock_dir, destination)
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            raise SetupError(f"claim stale setup lock {self.lock_dir}: {error}") from error
+        self._remove_path(destination, "stale setup lock")
+        return True
+
+    def acquire_lock(self) -> None:
+        try:
+            self.cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as error:
+            raise SetupError(f"create mdformat cache root {self.cache_root}: {error}") from error
+        cache_metadata = self._lstat(self.cache_root)
+        self._assert_owner(self.cache_root, cache_metadata)
+        if not stat.S_ISDIR(cache_metadata.st_mode) or stat.S_ISLNK(cache_metadata.st_mode):
+            raise SetupError(f"mdformat cache root is not a real directory: {self.cache_root}")
+        os.chmod(self.cache_root, 0o700)
+        self._assert_directory(self.cache_root)
+        relative_parts = self.environment_parent.relative_to(self.cache_root).parts
+        current = self.cache_root
+        for part in relative_parts:
+            current = current / part
+            self._ensure_directory(current)
+        while True:
+            try:
+                self.lock_dir.mkdir(mode=0o700)
+                self._assert_directory(self.lock_dir)
+                self.lock_owned = True
+                self._write_json(self.lock_dir / OWNER_RECORD, self._owner_record())
+                return
+            except FileExistsError:
+                if self._recover_stale_lock():
+                    continue
+                time.sleep(POLL_SECONDS)
+            except OSError as error:
+                raise SetupError(f"create setup lock {self.lock_dir}: {error}") from error
+
+    def _cleanup_staging(self, active_target: str | None = None) -> None:
+        try:
+            candidates = list(self.environment_parent.iterdir())
+        except OSError as error:
+            raise SetupError(f"list mdformat cache generations {self.environment_parent}: {error}") from error
+        for candidate in candidates:
+            if not candidate.name.startswith("staging."):
+                continue
+            if active_target and candidate.name == active_target:
+                continue
+            self._remove_path(candidate, "orphan mdformat staging generation")
+
+    def _active_target(self) -> tuple[Path | None, str | None]:
+        self.active_malformed = False
+        try:
+            metadata = self.environment_dir.lstat()
+        except FileNotFoundError:
+            return None, None
+        except OSError as error:
+            raise SetupError(f"inspect active mdformat pointer {self.environment_dir}: {error}") from error
+        self._assert_owner(self.environment_dir, metadata)
+        if not stat.S_ISLNK(metadata.st_mode):
+            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+                raise SetupError(f"active mdformat entry has an unsafe type: {self.environment_dir}")
+            self.active_malformed = True
+            return None, None
+        target = os.readlink(self.environment_dir)
+        if not target or "/" in target or target in {".", ".."}:
+            raise SetupError(f"invalid active mdformat pointer: {self.environment_dir}")
+        target_path = self.environment_parent / target
+        try:
+            target_metadata = target_path.lstat()
+        except FileNotFoundError:
+            return target_path, target
+        except OSError as error:
+            raise SetupError(f"inspect active mdformat generation {target_path}: {error}") from error
+        self._assert_owner(target_path, target_metadata)
+        if stat.S_ISLNK(target_metadata.st_mode) or not stat.S_ISDIR(target_metadata.st_mode):
+            raise SetupError(f"active mdformat pointer targets an unsafe entry: {self.environment_dir}")
+        return target_path, target
+
+    def _quarantine_malformed_active(self) -> None:
+        if not self.active_malformed:
+            return
+        try:
+            metadata = self.environment_dir.lstat()
+        except FileNotFoundError:
+            self.active_malformed = False
+            return
+        self._assert_owner(self.environment_dir, metadata)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SetupError(f"refusing to quarantine unsafe active symlink: {self.environment_dir}")
+        if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+            raise SetupError(f"active mdformat entry has an unsafe type: {self.environment_dir}")
+        quarantine = self.environment_parent / (
+            f"active.quarantine.{os.getpid()}.{uuid.uuid4().hex}"
+        )
+        try:
+            os.replace(self.environment_dir, quarantine)
+        except OSError as error:
+            raise SetupError(f"quarantine malformed active mdformat entry {self.environment_dir}: {error}") from error
+        self.quarantine = quarantine
+        self.active_malformed = False
+
+    def _validated_symlink_target(self, generation: Path, path: Path, relative: str) -> str:
+        target = os.readlink(path)
+        if relative == "lib64" and target == "lib":
+            expected = generation / "lib"
+            metadata = self._lstat(expected)
+            self._assert_owner(expected, metadata)
+            is_real_directory = stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
+            if is_real_directory and os.path.realpath(path) == str(expected):
+                return target
+        if relative.startswith("bin/") and os.path.realpath(path) == str(self.python_bin):
+            return target
+        raise SetupError(f"cache generation contains an unsafe symlink: {path}")
+
+    def _secure_tree(self, generation: Path, repair: bool) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = []
+        self._assert_directory(generation)
+        for root, directories, files in os.walk(generation, topdown=True, followlinks=False):
+            root_path = Path(root)
+            directories[:] = [directory for directory in directories if directory != "__pycache__"]
+            files[:] = [file_name for file_name in files if file_name not in {COMPLETION_MARKER, MANIFEST_NAME}]
+            for name in sorted(directories + files):
+                path = root_path / name
+                relative = path.relative_to(generation).as_posix()
+                if "__pycache__" in Path(relative).parts or relative in {COMPLETION_MARKER, MANIFEST_NAME}:
+                    continue
+                metadata = self._lstat(path)
+                self._assert_owner(path, metadata)
+                if stat.S_ISLNK(metadata.st_mode):
+                    target = self._validated_symlink_target(generation, path, relative)
+                    entries.append({"path": relative, "kind": "symlink", "target": target})
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    expected_mode = 0o700
+                    if repair:
+                        os.chmod(path, expected_mode)
+                    elif stat.S_IMODE(metadata.st_mode) != expected_mode:
+                        raise SetupError(f"cache generation directory permissions are not 0700: {path}")
+                    entries.append({"path": relative, "kind": "directory", "mode": expected_mode})
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise SetupError(f"cache generation contains an unsupported path: {path}")
+                executable = bool(metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+                expected_mode = 0o700 if executable else 0o600
+                if repair:
+                    os.chmod(path, expected_mode)
+                elif stat.S_IMODE(metadata.st_mode) != expected_mode:
+                    raise SetupError(f"cache generation file permissions are not {expected_mode:04o}: {path}")
+                entries.append(
+                    {
+                        "path": relative,
+                        "kind": "file",
+                        "mode": expected_mode,
+                        "sha256": self._sha256_file(path),
+                    }
+                )
+        return sorted(entries, key=lambda entry: str(entry["path"]))
+
+    def _package_versions(self, python_path: Path) -> list[dict[str, str]]:
+        code = (
+            "import importlib.metadata as m, json, sys; "
+            "print(json.dumps({n: m.version(n) for n in sys.argv[1:]}))"
+        )
+        try:
+            output = subprocess.check_output(
+                [str(python_path), "-c", code] + [package["name"] for package in self.expected_packages],
+                text=True,
+                stderr=subprocess.STDOUT,
+                env={"PATH": str(python_path.parent), "PYTHONNOUSERSITE": "1"},
+            )
+            values = json.loads(output)
+        except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as error:
+            raise SetupError(f"inspect installed mdformat packages with {python_path}: {error}") from error
+        actual = [
+            {"name": self._normalize_package(name), "version": str(version)}
+            for name, version in values.items()
+        ]
+        return sorted(actual, key=lambda package: package["name"])
+
+    def _validate_packages(self, generation: Path) -> None:
+        python_path = generation / "bin" / "python"
+        metadata = self._lstat(python_path)
+        if stat.S_ISLNK(metadata.st_mode):
+            if os.path.realpath(python_path) != str(self.python_bin):
+                raise SetupError(f"generation Python does not resolve to Mise Python: {python_path}")
+        elif not stat.S_ISREG(metadata.st_mode):
+            raise SetupError(f"generation Python is not executable: {python_path}")
+        actual = self._package_versions(python_path)
+        if actual != self.expected_packages:
+            raise SetupError(f"installed package set does not match the requirements lock: {generation}")
+
+    def _manifest_for(self, generation: Path, entries: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "schema": "mdformat-cache-v1",
+            "environment_id": self.environment_id,
+            "requirements_lock_sha256": self.lock_id,
+            "tool_provenance_sha256": self.tool_provenance_id,
+            "packages": self.expected_packages,
+            "files": entries,
+        }
+
+    def _generation_is_complete(self, generation: Path) -> bool:
+        try:
+            self._assert_directory(generation)
+            marker = generation / COMPLETION_MARKER
+            manifest_path = generation / MANIFEST_NAME
+            self._assert_file(marker, executable=False)
+            if marker.read_bytes() != f"{self.environment_id}\n".encode("utf-8"):
+                return False
+            self._assert_file(manifest_path, executable=False)
+            manifest = self._read_json(manifest_path)
+            if manifest.get("schema") != "mdformat-cache-v1":
+                return False
+            if manifest.get("environment_id") != self.environment_id:
+                return False
+            if manifest.get("requirements_lock_sha256") != self.lock_id:
+                return False
+            if manifest.get("tool_provenance_sha256") != self.tool_provenance_id:
+                return False
+            if manifest.get("packages") != self.expected_packages:
+                return False
+            expected_files = manifest.get("files")
+            if not isinstance(expected_files, list):
+                return False
+            self._validate_packages(generation)
+            actual_files = self._secure_tree(generation, repair=False)
+            if actual_files != expected_files:
+                return False
+            return True
+        except (OSError, SetupError, ValueError):
+            return False
+
+    def _find_completed_generation(self) -> Path | None:
+        active, active_target = self._active_target()
+        if active is not None and self._generation_is_complete(active):
+            return active
+        deterministic = self.environment_parent / "generation.completed"
+        if self._generation_is_complete(deterministic):
+            return deterministic
+        self._cleanup_staging(active_target)
+        return None
+
+    def _publish_pointer(self, generation: Path) -> None:
+        self._quarantine_malformed_active()
+        pointer = self.environment_parent / f"pointer.{uuid.uuid4().hex}"
+        try:
+            pointer.symlink_to(generation.name)
+            os.replace(pointer, self.environment_dir)
+        except OSError as error:
+            try:
+                pointer.unlink()
+            except OSError:
+                pass
+            raise SetupError(f"atomically publish mdformat environment pointer {self.environment_dir}: {error}") from error
+        if self.quarantine is not None:
+            quarantine = self.quarantine
+            try:
+                self._remove_path(quarantine, "quarantined malformed active entry")
+            except SetupError as error:
+                raise SetupError(f"clean quarantined malformed active entry {quarantine}: {error}") from error
+            self.quarantine = None
+
+    def _make_generation(self) -> Path:
+        try:
+            staging = Path(tempfile.mkdtemp(prefix="staging.", dir=self.environment_parent))
+        except OSError as error:
+            raise SetupError(f"create mdformat staging generation in {self.environment_parent}: {error}") from error
+        os.chmod(staging, 0o700)
+        self.staging = staging
+        return staging
+
+    def _run_worker_launcher(self, read_fd: int, staging: Path) -> None:
+        """Run and reap the installer while retaining process ownership.
+
+        The supervisor can be killed without notice, so the launcher must stay
+        alive independently. It is the session and process-group owner. On
+        termination it signals its own group, also signals the installer's
+        current group for shells that create one on macOS, and waits for the
+        direct child. Recovery only has to identify and signal this launcher;
+        it never guesses from a global process listing or a recycled PGID.
+        """
+        os.setsid()
+        stopping = False
+
+        def request_stop(_signum: int, _frame: object) -> None:
+            nonlocal stopping
+            stopping = True
+
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+        signal.siginterrupt(signal.SIGTERM, True)
+        signal.siginterrupt(signal.SIGINT, True)
+
+        try:
+            while True:
+                try:
+                    release = os.read(read_fd, 1)
+                    break
+                except InterruptedError:
+                    if stopping:
+                        release = b""
+                        break
+            os.close(read_fd)
+            if release != b"1" or stopping:
+                self._write_json(
+                    self.lock_dir / WORKER_ABORTED,
+                    {"pid": os.getpid(), "reason": "supervisor exited before worker release"},
+                )
+                os._exit(0)
+
+            worker_pid = os.fork()
+            if worker_pid == 0:
+                try:
+                    os.execv(
+                        str(self.bash_bin),
+                        [
+                            str(self.bash_bin),
+                            str(self.worker_script),
+                            str(self.uv_bin),
+                            str(staging),
+                            str(self.python_bin),
+                            str(self.requirements_lock),
+                        ],
+                    )
+                except BaseException:
+                    os._exit(127)
+
+            def signal_owned_groups(signum: int) -> None:
+                groups: set[int] = {os.getpgrp()}
+                try:
+                    groups.add(os.getpgid(worker_pid))
+                except ProcessLookupError:
+                    pass
+                for pgid in groups:
+                    try:
+                        os.killpg(pgid, signum)
+                    except ProcessLookupError:
+                        pass
+
+            def signal_worker_directly(signum: int) -> None:
+                try:
+                    # Direct signalling covers a shell that has moved the
+                    # installer into a different session before its group was
+                    # observable by the launcher.
+                    os.kill(worker_pid, signum)
+                except ProcessLookupError:
+                    pass
+
+            def kill_worker_group(signum: int) -> None:
+                launcher_pgid = os.getpgrp()
+                try:
+                    worker_pgid = os.getpgid(worker_pid)
+                except ProcessLookupError:
+                    worker_pgid = None
+                if worker_pgid is not None and worker_pgid != launcher_pgid:
+                    try:
+                        os.killpg(worker_pgid, signum)
+                    except ProcessLookupError:
+                        pass
+                signal_worker_directly(signum)
+
+            def reap_worker(nonblocking: bool) -> int | None:
+                options = os.WNOHANG if nonblocking else 0
+                while True:
+                    try:
+                        waited_pid, status = os.waitpid(worker_pid, options)
+                        break
+                    except InterruptedError:
+                        continue
+                if waited_pid == 0:
+                    return None
+                if os.WIFEXITED(status):
+                    return os.WEXITSTATUS(status)
+                if os.WIFSIGNALED(status):
+                    return 128 + os.WTERMSIG(status)
+                return 1
+
+            while True:
+                if stopping:
+                    # Do not let the group signal terminate the launcher
+                    # before it has reaped its child.
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                    signal_owned_groups(signal.SIGTERM)
+                    signal_worker_directly(signal.SIGTERM)
+                    deadline = time.monotonic() + PROCESS_STOP_SECONDS
+                    while time.monotonic() < deadline:
+                        status = reap_worker(nonblocking=True)
+                        if status is not None:
+                            os._exit(status)
+                        time.sleep(POLL_SECONDS)
+                    kill_worker_group(signal.SIGKILL)
+                    status = reap_worker(nonblocking=False)
+                    os._exit(status if status is not None else 1)
+
+                status = reap_worker(nonblocking=True)
+                if status is not None:
+                    os._exit(status)
+                time.sleep(POLL_SECONDS)
+        except BaseException:
+            os._exit(127)
+
+    def _launch_worker(self, staging: Path) -> int:
+        intent = {
+            "owner_pid": os.getpid(),
+            "owner_started": self._process_start_identity(os.getpid()),
+            "staging": str(staging),
+            "state": "starting",
+        }
+        self._write_json(self.lock_dir / WORKER_INTENT, intent)
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(write_fd)
+            self._run_worker_launcher(read_fd, staging)
+            os._exit(127)
+        os.close(read_fd)
+        self.worker_read_fd = write_fd
+        started = self._process_start_identity(pid)
+        if not started:
+            os.close(write_fd)
+            raise SetupError(f"identify installer launcher process {pid}")
+        self.worker_pid = pid
+        self.worker_started = started
+        self._write_json(
+            self.lock_dir / WORKER_RECORD,
+            {"pid": pid, "started": started, "staging": str(staging)},
+        )
+        self._write_json(
+            self.lock_dir / WORKER_INTENT,
+            {**intent, "state": "released", "worker_pid": pid},
+        )
+        os.write(write_fd, b"1")
+        os.close(write_fd)
+        self.worker_read_fd = None
+        return pid
+
+    def _wait_worker(self, pid: int) -> int:
+        while True:
+            if self.stop_requested:
+                self._terminate_recorded_worker({"pid": pid, "started": self.worker_started})
+            try:
+                waited_pid, status = os.waitpid(pid, os.WNOHANG)
+            except InterruptedError:
+                continue
+            if waited_pid == 0:
+                time.sleep(POLL_SECONDS)
+                continue
+            if os.WIFEXITED(status):
+                return os.WEXITSTATUS(status)
+            if os.WIFSIGNALED(status):
+                return 128 + os.WTERMSIG(status)
+            return 1
+
+    def _cleanup(self) -> None:
+        failures: list[str] = []
+        if self.worker_read_fd is not None:
+            try:
+                os.close(self.worker_read_fd)
+            except OSError as error:
+                failures.append(f"close installer handshake: {error}")
+            self.worker_read_fd = None
+        if self.worker_pid is not None and self.worker_started:
+            try:
+                self._terminate_recorded_worker(
+                    {"pid": self.worker_pid, "started": self.worker_started}
+                )
+            except SetupError as error:
+                failures.append(str(error))
+        if self.staging is not None:
+            try:
+                self._remove_path(self.staging, "temporary mdformat generation")
+            except SetupError as error:
+                failures.append(str(error))
+            self.staging = None
+        if self.quarantine is not None:
+            try:
+                self._remove_path(self.quarantine, "quarantined malformed active entry")
+            except SetupError as error:
+                failures.append(str(error))
+            self.quarantine = None
+        if self.lock_owned:
+            try:
+                self._remove_path(self.lock_dir, "setup lock")
+            except SetupError as error:
+                failures.append(str(error))
+            self.lock_owned = False
+        if failures:
+            raise SetupError("; ".join(failures))
+
+    def run(self) -> int:
+        self.acquire_lock()
+        try:
+            active, active_target = self._active_target()
+            completed = self._find_completed_generation()
+            if completed is not None:
+                if active is None or active != completed:
+                    self._publish_pointer(completed)
+                self._cleanup_staging(active_target)
+                print(f"mdformat setup: using the completed hash-locked environment at {self.environment_dir}")
+                return 0
+
+            staging = self._make_generation()
+            pid = self._launch_worker(staging)
+            status = self._wait_worker(pid)
+            if status != 0:
+                raise SetupError(f"hash-locked installer exited with status {status}")
+            self._validate_packages(staging)
+            entries = self._secure_tree(staging, repair=True)
+            manifest = self._manifest_for(staging, entries)
+            self._write_json(staging / MANIFEST_NAME, manifest)
+            self._write_bytes(staging / COMPLETION_MARKER, f"{self.environment_id}\n".encode("utf-8"))
+            completed_path = self.environment_parent / "generation.completed"
+            publication_target = completed_path
+            if completed_path.exists() and not self._generation_is_complete(completed_path):
+                active_path, _ = self._active_target()
+                if active_path == completed_path:
+                    # Do not remove a target that a reader may already have
+                    # resolved. Keep it as an invalid orphan and publish the
+                    # rebuilt generation under a deterministic-session name.
+                    publication_target = self.environment_parent / (
+                        f"generation.rebuilt.{uuid.uuid4().hex}"
+                    )
+                else:
+                    self._remove_path(completed_path, "invalid mdformat generation")
+            try:
+                os.replace(staging, publication_target)
+            except OSError as error:
+                raise SetupError(f"finalize mdformat generation {completed_path}: {error}") from error
+            self.staging = None
+            self._publish_pointer(publication_target)
+            self._cleanup_staging(None)
+            print(f"mdformat setup: installed the hash-locked environment at {self.environment_dir}")
+            return 0
+        finally:
+            self._cleanup()
+
+    def request_stop(self, _signum: int, _frame: object) -> None:
+        self.stop_requested = True
+
+
+def main() -> int:
+    if len(sys.argv) != 11:
+        print("mdformat setup: supervisor received an invalid argument set", file=sys.stderr)
+        return 2
+    supervisor = Supervisor(sys.argv[1:])
+    signal.signal(signal.SIGTERM, supervisor.request_stop)
+    signal.signal(signal.SIGINT, supervisor.request_stop)
+    try:
+        return supervisor.run()
+    except SetupError as error:
+        print(f"mdformat setup: {error}", file=sys.stderr)
+        try:
+            supervisor._cleanup()
+        except SetupError as cleanup_error:
+            print(f"mdformat setup: cleanup failed: {cleanup_error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

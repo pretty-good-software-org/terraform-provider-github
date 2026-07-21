@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Lint Markdown files"
+set -euo pipefail
+
+# Generated provider docs keep their existing tfplugindocs output format.
+markdownlint-cli2 "**/*.md" "!docs/**/*.md"

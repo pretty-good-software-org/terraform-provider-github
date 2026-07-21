@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Lint YAML files"
+set -euo pipefail
+
+# Existing provider workflows retain their upstream formatting and validation.
+yamllint --strict .github/workflows/tooling.yaml lefthook.yml lefthook/*.yml .yamllint.yml

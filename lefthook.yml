@@ -1,0 +1,5 @@
+extends:
+  - lefthook/files.yml
+  - lefthook/lint.yml
+  - lefthook/go.yml
+  - lefthook/secrets.yml

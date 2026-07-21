@@ -1,0 +1,41 @@
+name: Tooling
+
+on:
+  push:
+    branches:
+      - main
+      - release-v*
+  pull_request:
+    branches:
+      - main
+      - release-v*
+
+concurrency:
+  group: tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    name: Mise tooling
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The shared setup is pinned to ci-shared@3e43ae5. It supplies Mise
+      # 2026.7.1 and installs the committed six-platform locks in CI mode.
+      - name: Setup Mise
+        uses: pretty-good-software-org/ci-shared/actions/setup/mise@3e43ae583558b430bce9ead386266daf6a99508c # v1
+        with:
+          mise-env: ci
+      - name: Lint workflow and YAML files
+        run: |
+          mise run lint:actionlint
+          mise run lint:yamllint
+      - name: Check Markdown tooling
+        run: mise run check:mdformat-version
+      - name: Check provider dependencies
+        run: mise run lint:vulncheck
