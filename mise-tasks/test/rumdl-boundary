@@ -1,69 +1,290 @@
 #!/usr/bin/env bash
-#MISE description="Regress the isolated rumdl Markdown boundary"
+#MISE description="Exercise the rumdl lint and formatter boundary"
 set -euo pipefail
 
-project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
-status_before="$(git -C "$project_root" status --porcelain)"
-head_before="$(git -C "$project_root" rev-parse HEAD)"
-config_stderr="$(mktemp "${TMPDIR:-/tmp}/rumdl-config.XXXXXX")"
-fixture=""
-authoring_root=""
-trap 'rm -rf "$authoring_root" "$config_stderr"' EXIT
-config_json="$(rumdl config --no-defaults --output json 2>"$config_stderr")"
-test ! -s "$config_stderr"
-CONFIG_JSON="$config_json" python3 - <<'PY'
+readonly project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
+readonly formatter_override="--extend-enable MD029,MD060 --config 'MD060.enabled = true'"
+readonly formatter_override_prefix="--extend-enable MD029,MD060 --config"
+readonly expected_enable=(
+  MD001 MD003 MD004 MD005 MD007 MD009 MD010 MD011 MD012 MD014 MD018 MD019
+  MD020 MD021 MD023 MD025 MD026 MD027 MD030 MD035 MD038 MD039 MD040 MD042
+  MD043 MD044 MD045 MD046 MD047 MD048 MD049 MD050 MD051 MD052 MD053 MD054
+  MD055 MD056 MD058 MD059 MD071 MD076
+)
+readonly expected_fixable=(MD007 MD013 MD029 MD047 MD060 MD071 MD076)
+readonly status_before="$(git -C "$project_root" status --porcelain)"
+readonly head_before="$(git -C "$project_root" rev-parse HEAD)"
+readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary.XXXXXX")"
+readonly expected_file="$test_root/expected.md"
+
+cleanup() {
+  local status=$?
+  if ! rm -rf -- "$test_root"; then
+    printf 'rumdl boundary: failed to remove %s\n' "$test_root" >&2
+    status=1
+  fi
+  trap - EXIT
+  exit "$status"
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'rumdl boundary: %s\n' "$1" >&2
+  exit 1
+}
+
+write_input() {
+  cat <<'EOF'
+# Formatter Boundary
+
+1. first
+3. second
+
+| Name | Age | City |
+|---|---|---|
+| Alice | 30 | Seattle |
+| Bob | 25 | Portland |
+EOF
+}
+
+write_expected() {
+  cat <<'EOF'
+# Formatter Boundary
+
+1. first
+2. second
+
+| Name  | Age | City     |
+| ----- | --- | -------- |
+| Alice | 30  | Seattle  |
+| Bob   | 25  | Portland |
+EOF
+}
+
+assert_config() {
+  local config_stderr config_json
+  config_stderr="$(mktemp "$test_root/config.XXXXXX")"
+  config_json="$(cd "$project_root" && rumdl config --no-defaults --output json 2>"$config_stderr")" || {
+    cat "$config_stderr" >&2
+    fail 'rumdl config could not be parsed'
+  }
+  [[ ! -s "$config_stderr" ]] || {
+    cat "$config_stderr" >&2
+    fail 'rumdl config emitted a warning'
+  }
+  CONFIG_JSON="$config_json" EXPECTED_ENABLE="${expected_enable[*]}" EXPECTED_FIXABLE="${expected_fixable[*]}" python3 - <<'PY'
 import json
 import os
 
 config = json.loads(os.environ["CONFIG_JSON"])
-assert config["global"]["enable"] == [], config["global"]
-assert config["global"]["fixable"] == [], config["global"]
-assert config["global"]["disable"] == ["MD013", "MD028", "MD060"], config["global"]
-assert config["MD029"] == {"style": "ordered"}, config["MD029"]
-assert config["MD060"] == {"enabled": False, "max-width": 120, "style": "aligned"}, config["MD060"]
+expected_enable = os.environ["EXPECTED_ENABLE"].split()
+expected_fixable = os.environ["EXPECTED_FIXABLE"].split()
+
+
+def require_equal(name, actual, expected):
+    if actual != expected:
+        raise SystemExit(f"{name}: expected {expected!r}, got {actual!r}")
+
+
+global_config = config["global"]
+require_equal("global.enable", global_config["enable"], expected_enable)
+require_equal("global.fixable", global_config["fixable"], expected_fixable)
+require_equal("global.exclude", global_config["exclude"], ["node_modules/**"])
+require_equal(
+    "per-file-ignores",
+    config["per-file-ignores"],
+    {
+        ".github/pull_request_template.md": ["MD041"],
+        "docs/**/*.md": ["MD012", "MD022", "MD059"],
+    },
+)
+require_equal("MD010", config["MD010"], {"code-blocks": True})
+require_equal("MD013", config["MD013"], {"tables": False})
+require_equal("MD027", config["MD027"], {"list-items": True})
+require_equal("MD029", config["MD029"], {"style": "ordered"})
+require_equal("MD051", config["MD051"], {"ignore-case": False})
+require_equal(
+    "MD060",
+    config["MD060"],
+    {"enabled": False, "max-width": 120, "style": "aligned"},
+)
 PY
-
-check_task="$project_root/mise-tasks/check/markdown-format"
-format_task="$project_root/mise-tasks/format/markdown"
-for file in "$check_task" "$format_task"; do
-  grep -Fq -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$file"
-done
-grep -Fq -- "! -path './docs/*'" "$check_task"
-grep -Fq -- "! -path './docs/*'" "$format_task"
-test "$(grep -hFc -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$check_task" "$format_task" | awk '{total += $1} END {print total}')" = 2
-
-authoring_root="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary.XXXXXX")"
-fixture="$authoring_root/docs-boundary.md"
-mkdir -p "$authoring_root/mise-tasks/check" "$authoring_root/mise-tasks/format"
-cp "$project_root/.rumdl.toml" "$authoring_root/.rumdl.toml"
-printf '%s\n' '# Fixture' '' '| A | B |' '|---|---|' '| short | this is a long value that exercises the table formatter |' > "$fixture"
-cp "$check_task" "$authoring_root/mise-tasks/check/markdown-format"
-cp "$format_task" "$authoring_root/mise-tasks/format/markdown"
-chmod +x "$authoring_root/mise-tasks/check/markdown-format" "$authoring_root/mise-tasks/format/markdown"
-
-run_production_format() {
-  (cd "$authoring_root" && MISE_PROJECT_ROOT="$authoring_root" bash mise-tasks/format/markdown)
+  if grep -Eq '^[[:space:]]*disable[[:space:]]*=' "$project_root/.rumdl.toml"; then
+    fail 'global disable must not be present in the source configuration'
+  fi
 }
-run_production_format
-expected_output="$(cat "$fixture")"
-run_production_format
-test "$(cat "$fixture")" = "$expected_output"
-expected_literal=$'# Fixture\n\n| A     | B                                                       |\n| ----- | ------------------------------------------------------- |\n| short | this is a long value that exercises the table formatter |'
-test "$expected_output" = "$expected_literal"
 
-removal_root="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary-removal.XXXXXX")"
-cp "$project_root/.rumdl.toml" "$removal_root/.rumdl.toml"
-printf '%s\n' '# Fixture' '' '| A | B |' '|---|---|' '| short | this is a long value that exercises the table formatter |' > "$removal_root/unformatted.md"
-cp "$authoring_root/mise-tasks/format/markdown" "$removal_root/format-without-override"
-sed -i.bak "s/ --extend-enable MD029,MD060 --config 'MD060.enabled = true'//" "$removal_root/format-without-override"
-cp "$removal_root/unformatted.md" "$removal_root/before-removal"
-# Removing the exact production override must change the formatter result.
-(cd "$removal_root" && MISE_PROJECT_ROOT="$removal_root" bash format-without-override)
-test "$(cat "$removal_root/unformatted.md")" = "$(cat "$removal_root/before-removal")"
-test "$(cat "$removal_root/unformatted.md")" != "$expected_literal"
-rm -rf "$removal_root"
+assert_formatter_call_sites() {
+  local actual_call_sites expected_call_sites call_site formatter_count
+  actual_call_sites="$(
+    git -C "$project_root" grep -l -F -- 'rumdl fmt ' -- . \
+      ':(exclude)mise-tasks/test/rumdl-boundary' 2>/dev/null | LC_ALL=C sort
+  )"
+  expected_call_sites=$'GNUmakefile\nmise-tasks/check/markdown-format\nmise-tasks/format/markdown'
+  [[ "$actual_call_sites" == "$expected_call_sites" ]] || {
+    printf 'Expected formatter call sites:\n%s\nActual formatter call sites:\n%s\n' \
+      "$expected_call_sites" "$actual_call_sites" >&2
+    exit 1
+  }
 
-(cd "$authoring_root" && MISE_PROJECT_ROOT="$authoring_root" bash mise-tasks/check/markdown-format)
+  formatter_count="$(
+    git -C "$project_root" grep -o -F -- 'rumdl fmt ' -- . \
+      ':(exclude)mise-tasks/test/rumdl-boundary' 2>/dev/null |
+      wc -l | tr -d ' '
+  )"
+  [[ "$formatter_count" == 4 ]] ||
+    fail "expected four production formatter invocations, found $formatter_count"
+
+  while IFS= read -r call_site; do
+    while IFS= read -r formatter_line; do
+      [[ "$formatter_line" == *"$formatter_override_prefix"* ]] ||
+        fail "$call_site has a formatter invocation without the MD029/MD060 override"
+      [[ "$formatter_line" == *'MD060.enabled = true'* ]] ||
+        fail "$call_site has a formatter invocation without the MD060 enable override"
+      [[ "$formatter_line" != *MD071* ]] ||
+        fail "$call_site widens the formatter override beyond MD029/MD060"
+    done < <(grep -F -- 'rumdl fmt ' "$project_root/$call_site")
+  done <<<"$expected_call_sites"
+}
+
+create_fixture() {
+  local fixture="$test_root/fixture"
+  mkdir -p -- "$fixture/mise-tasks/format" "$fixture/mise-tasks/check" "$fixture/mise-tasks/lint" "$fixture/docs"
+  cp -- "$project_root/.rumdl.toml" "$fixture/.rumdl.toml"
+  cp -- "$project_root/mise-tasks/format/markdown" "$fixture/mise-tasks/format/markdown"
+  cp -- "$project_root/mise-tasks/check/markdown-format" "$fixture/mise-tasks/check/markdown-format"
+  cp -- "$project_root/mise-tasks/lint/rumdl" "$fixture/mise-tasks/lint/rumdl"
+  chmod +x "$fixture/mise-tasks/format/markdown" "$fixture/mise-tasks/check/markdown-format" "$fixture/mise-tasks/lint/rumdl"
+  write_input >"$fixture/dual.md"
+  write_input >"$fixture/docs/generated.md"
+  git init -q -- "$fixture"
+  git -C "$fixture" add -- dual.md docs/generated.md
+  printf '%s\n' "$fixture"
+}
+
+run_task() {
+  local task="$1" fixture="$2" output="$3"
+  (
+    cd -- "$fixture"
+    MISE_PROJECT_ROOT="$fixture" bash "$task"
+  ) >"$output" 2>&1
+}
+
+assert_expected_output() {
+  local actual="$1"
+  cmp -s -- "$actual" "$expected_file" || {
+    diff -u -- "$expected_file" "$actual" >&2 || true
+    return 1
+  }
+}
+
+assert_production_boundary() {
+  local fixture="$1" before_docs before_format format_output check_output lint_output
+  before_docs="$test_root/docs-before.md"
+  before_format="$test_root/before-format.md"
+  format_output="$test_root/format.output"
+  check_output="$test_root/check.output"
+  lint_output="$test_root/lint.output"
+
+  write_expected >"$expected_file"
+  cp -- "$fixture/docs/generated.md" "$before_docs"
+
+  # Formatter-only rules must not enter the semantic lint boundary.
+  if ! run_task "$project_root/mise-tasks/lint/rumdl" "$fixture" "$lint_output"; then
+    cat "$lint_output" >&2
+    fail 'actual rumdl lint rejected the formatter-only fixture'
+  fi
+  if grep -Eq 'MD029|MD060' "$lint_output"; then
+    cat "$lint_output" >&2
+    fail 'actual rumdl lint reported formatter-only MD029 or MD060'
+  fi
+
+  run_task "$project_root/mise-tasks/format/markdown" "$fixture" "$format_output" || {
+    cat "$format_output" >&2
+    fail 'the production formatter failed on the fixture'
+  }
+  assert_expected_output "$fixture/dual.md" ||
+    fail 'the production formatter did not produce the complete literal output'
+  cmp -s -- "$fixture/docs/generated.md" "$before_docs" ||
+    fail 'the production formatter crossed the generated-doc scope boundary'
+
+  cp -- "$fixture/dual.md" "$before_format"
+  run_task "$project_root/mise-tasks/format/markdown" "$fixture" "$format_output" || {
+    cat "$format_output" >&2
+    fail 'the second production formatter pass failed'
+  }
+  cmp -s -- "$fixture/dual.md" "$before_format" ||
+    fail 'the production formatter is not idempotent'
+
+  write_input >"$fixture/dual.md"
+  if run_task "$project_root/mise-tasks/check/markdown-format" "$fixture" "$check_output"; then
+    cat "$check_output" >&2
+    fail 'the production format check accepted unformatted input'
+  fi
+  grep -Fq -- 'Would fix:' "$check_output" || {
+    cat "$check_output" >&2
+    fail 'the production format check did not report the formatter boundary'
+  }
+
+  run_task "$project_root/mise-tasks/format/markdown" "$fixture" "$format_output" || {
+    cat "$format_output" >&2
+    fail 'the production formatter could not prepare the check fixture'
+  }
+  assert_expected_output "$fixture/dual.md" ||
+    fail 'the format-check fixture did not reach the complete literal output'
+  run_task "$project_root/mise-tasks/check/markdown-format" "$fixture" "$check_output" || {
+    cat "$check_output" >&2
+    fail 'the production format check rejected formatter output'
+  }
+}
+
+assert_override_mutation() {
+  local fixture="$1" mutation_task="$test_root/format-without-override" mutation_output="$test_root/mutation.output"
+  write_input >"$fixture/dual.md"
+  [[ "$(grep -Fc -- "$formatter_override" "$project_root/mise-tasks/format/markdown")" == 1 ]] ||
+    fail 'the formatter mutation target must occur exactly once'
+  sed "s| $formatter_override||" "$project_root/mise-tasks/format/markdown" >"$mutation_task"
+  chmod +x "$mutation_task"
+  run_task "$mutation_task" "$fixture" "$mutation_output" || {
+    cat "$mutation_output" >&2
+    fail 'the formatter without its override failed before the mutation assertion'
+  }
+  if cmp -s -- "$fixture/dual.md" "$expected_file"; then
+    fail 'removing the formatter override did not change the literal output'
+  fi
+}
+
+assert_lint_rule_boundary() {
+  local probe="$test_root/probe" probe_output="$test_root/probe.output"
+  mkdir -p -- "$probe/mise-tasks/lint"
+  cp -- "$project_root/.rumdl.toml" "$probe/.rumdl.toml"
+  cp -- "$project_root/mise-tasks/lint/rumdl" "$probe/mise-tasks/lint/rumdl"
+  chmod +x "$probe/mise-tasks/lint/rumdl"
+  cat >"$probe/probe.md" <<'EOF'
+# Formerly lint-only probe
+
+```
+content
+```
+EOF
+  if run_task "$project_root/mise-tasks/lint/rumdl" "$probe" "$probe_output"; then
+    cat "$probe_output" >&2
+    fail 'the formerly lint-only MD040 probe unexpectedly passed'
+  fi
+  grep -Fq -- 'MD040' "$probe_output" || {
+    cat "$probe_output" >&2
+    fail 'the MD040 probe did not report MD040'
+  }
+}
+
+command -v rumdl >/dev/null 2>&1 || fail 'rumdl is not available on PATH'
+assert_config
+assert_formatter_call_sites
+fixture="$(create_fixture)"
+assert_production_boundary "$fixture"
+assert_override_mutation "$fixture"
+assert_lint_rule_boundary
+
 test "$(git -C "$project_root" rev-parse HEAD)" = "$head_before"
 test "$(git -C "$project_root" status --porcelain)" = "$status_before"
-printf '%s\n' 'rumdl boundary regression passed'
+printf '%s\n' 'rumdl boundary tests passed'

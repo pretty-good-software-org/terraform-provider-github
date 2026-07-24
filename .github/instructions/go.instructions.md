@@ -22,14 +22,14 @@ and [`tests.instructions.md`](tests.instructions.md)) - this file does
 >
 > - Only report `HIGH` and `MEDIUM` findings. Do not report `LOW` or nits.
 > - Do not flag formatting, import ordering, identifier style, comment
->   prose, or speculative refactors. Those belong to linters (`gofmt`,
->   `goimports`, `go vet`, `golangci-lint`) and human reviewers, not CCR.
+> prose, or speculative refactors. Those belong to linters (`gofmt`,
+> `goimports`, `go vet`, `golangci-lint`) and human reviewers, not CCR.
 > - The Go-version anchors in `copilot-instructions.md` (Go 1.26, loop
->   variable scoping, `range over int`, etc.) take precedence over any
->   pre-1.22 patterns implied below.
+> variable scoping, `range over int`, etc.) take precedence over any
+> pre-1.22 patterns implied below.
 > - The repo-specific exception in `schema-and-state.instructions.md`
->   ("no read-after-write" in create/update) still holds even though
->   generic Go style might suggest otherwise.
+> ("no read-after-write" in create/update) still holds even though
+> generic Go style might suggest otherwise.
 >
 > Use the rest of this file as background for *what idiomatic Go looks
 > like*. Only escalate a Go-style observation into a comment when it
