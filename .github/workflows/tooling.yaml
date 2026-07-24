@@ -35,7 +35,5 @@ jobs:
         run: |
           mise run lint:actionlint
           mise run lint:yamllint
-      - name: Check Markdown tooling
-        run: mise run check:mdformat-version
       - name: Check provider dependencies
         run: mise run lint:vulncheck

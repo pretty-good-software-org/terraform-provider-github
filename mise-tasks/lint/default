@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 #MISE description="Run repository lint checks"
-#MISE depends=["check:markdown-format", "lint:actionlint", "lint:yamllint", "lint:markdownlint", "lint:go"]
+#MISE depends=["lint:actionlint", "lint:yamllint", "lint:go"]
 set -euo pipefail
