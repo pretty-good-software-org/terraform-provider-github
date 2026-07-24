@@ -106,8 +106,8 @@ yamlfmt:
 	@yamlfmt -continue_on_error .
 
 mdfmt:
-	@files=$$(find . -type f -name '*.md' ! -path './docs/*' -print); \
-	rumdl fmt --extend-enable MD029,MD060 --config "MD060.enabled = true" -- $$(printf '%s ' $$files)
+	@find . -type f -name '*.md' ! -path './docs/*' -exec \
+		rumdl fmt --extend-enable MD029,MD060 --config "MD060.enabled = true" -- {} +
 
 mdlint:
 	@rumdl check $(RUMDL_ARGS) .

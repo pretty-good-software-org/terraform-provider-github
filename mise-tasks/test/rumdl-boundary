@@ -254,6 +254,37 @@ assert_override_mutation() {
   fi
 }
 
+assert_make_filename_scope() {
+  local fixture="$test_root/make-filename-boundary"
+  local space_file newline_file generated_file make_output
+  mkdir -p -- "$fixture/docs"
+  cp -- "$project_root/.rumdl.toml" "$fixture/.rumdl.toml"
+  cp -- "$project_root/GNUmakefile" "$fixture/GNUmakefile"
+  space_file="$fixture/notes with spaces.md"
+  newline_file="$fixture/notes"$'\n'"with-newline.md"
+  generated_file="$fixture/docs/generated.md"
+  make_output="$test_root/make-filename-boundary.output"
+  write_input >"$space_file"
+  write_input >"$newline_file"
+  write_input >"$generated_file"
+  write_expected >"$expected_file"
+  cp -- "$generated_file" "$test_root/generated-before-make.md"
+
+  if ! (
+    cd -- "$fixture"
+    make -f GNUmakefile mdfmt
+  ) >"$make_output" 2>&1; then
+    cat "$make_output" >&2
+    fail 'GNUmakefile mdfmt failed for Markdown filenames containing whitespace'
+  fi
+  assert_expected_output "$space_file" ||
+    fail 'GNUmakefile mdfmt did not format a filename containing spaces'
+  assert_expected_output "$newline_file" ||
+    fail 'GNUmakefile mdfmt did not format a filename containing a newline'
+  cmp -s -- "$generated_file" "$test_root/generated-before-make.md" ||
+    fail 'GNUmakefile mdfmt crossed the generated-doc scope boundary'
+}
+
 assert_lint_rule_boundary() {
   local probe="$test_root/probe" probe_output="$test_root/probe.output"
   mkdir -p -- "$probe/mise-tasks/lint"
@@ -283,6 +314,7 @@ assert_formatter_call_sites
 fixture="$(create_fixture)"
 assert_production_boundary "$fixture"
 assert_override_mutation "$fixture"
+assert_make_filename_scope
 assert_lint_rule_boundary
 
 test "$(git -C "$project_root" rev-parse HEAD)" = "$head_before"
