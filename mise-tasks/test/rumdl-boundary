@@ -4,7 +4,13 @@ set -euo pipefail
 
 project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
 status_before="$(git -C "$project_root" status --porcelain)"
-config_json="$(rumdl config --no-defaults --output json)"
+head_before="$(git -C "$project_root" rev-parse HEAD)"
+config_stderr="$(mktemp "${TMPDIR:-/tmp}/rumdl-config.XXXXXX")"
+fixture=""
+authoring_root=""
+trap 'rm -rf "$authoring_root" "$config_stderr"' EXIT
+config_json="$(rumdl config --no-defaults --output json 2>"$config_stderr")"
+test ! -s "$config_stderr"
 CONFIG_JSON="$config_json" python3 - <<'PY'
 import json
 import os
@@ -17,20 +23,47 @@ assert config["MD029"] == {"style": "ordered"}, config["MD029"]
 assert config["MD060"] == {"enabled": False, "max-width": 120, "style": "aligned"}, config["MD060"]
 PY
 
-for file in mise-tasks/check/markdown-format mise-tasks/format/markdown; do
-  grep -Fq -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$project_root/$file"
+check_task="$project_root/mise-tasks/check/markdown-format"
+format_task="$project_root/mise-tasks/format/markdown"
+for file in "$check_task" "$format_task"; do
+  grep -Fq -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$file"
 done
-grep -Fq -- "! -path './docs/*'" "$project_root/mise-tasks/check/markdown-format"
-grep -Fq -- "! -path './docs/*'" "$project_root/mise-tasks/format/markdown"
+grep -Fq -- "! -path './docs/*'" "$check_task"
+grep -Fq -- "! -path './docs/*'" "$format_task"
+test "$(grep -hFc -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$check_task" "$format_task" | awk '{total += $1} END {print total}')" = 2
 
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary.XXXXXX")"
-trap 'rm -rf "$fixture"' EXIT
-printf '%s\n' '# Fixture' '- one' '- two' > "$fixture/source.md"
-cp "$fixture/source.md" "$fixture/first.md"
-rumdl fmt --extend-enable MD029,MD060 --config 'MD060.enabled = true' "$fixture/first.md" >/tmp/rumdl-boundary-format.out
-cp "$fixture/first.md" "$fixture/second.md"
-rumdl fmt --extend-enable MD029,MD060 --config 'MD060.enabled = true' "$fixture/second.md" >/tmp/rumdl-boundary-format-second.out
-cmp "$fixture/first.md" "$fixture/second.md"
+authoring_root="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary.XXXXXX")"
+fixture="$authoring_root/docs-boundary.md"
+mkdir -p "$authoring_root/mise-tasks/check" "$authoring_root/mise-tasks/format"
+cp "$project_root/.rumdl.toml" "$authoring_root/.rumdl.toml"
+printf '%s\n' '# Fixture' '' '| A | B |' '|---|---|' '| short | this is a long value that exercises the table formatter |' > "$fixture"
+cp "$check_task" "$authoring_root/mise-tasks/check/markdown-format"
+cp "$format_task" "$authoring_root/mise-tasks/format/markdown"
+chmod +x "$authoring_root/mise-tasks/check/markdown-format" "$authoring_root/mise-tasks/format/markdown"
 
+run_production_format() {
+  (cd "$authoring_root" && MISE_PROJECT_ROOT="$authoring_root" bash mise-tasks/format/markdown)
+}
+run_production_format
+expected_output="$(cat "$fixture")"
+run_production_format
+test "$(cat "$fixture")" = "$expected_output"
+expected_literal=$'# Fixture\n\n| A     | B                                                       |\n| ----- | ------------------------------------------------------- |\n| short | this is a long value that exercises the table formatter |'
+test "$expected_output" = "$expected_literal"
+
+removal_root="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary-removal.XXXXXX")"
+cp "$project_root/.rumdl.toml" "$removal_root/.rumdl.toml"
+printf '%s\n' '# Fixture' '' '| A | B |' '|---|---|' '| short | this is a long value that exercises the table formatter |' > "$removal_root/unformatted.md"
+cp "$authoring_root/mise-tasks/format/markdown" "$removal_root/format-without-override"
+sed -i.bak "s/ --extend-enable MD029,MD060 --config 'MD060.enabled = true'//" "$removal_root/format-without-override"
+cp "$removal_root/unformatted.md" "$removal_root/before-removal"
+# Removing the exact production override must change the formatter result.
+(cd "$removal_root" && MISE_PROJECT_ROOT="$removal_root" bash format-without-override)
+test "$(cat "$removal_root/unformatted.md")" = "$(cat "$removal_root/before-removal")"
+test "$(cat "$removal_root/unformatted.md")" != "$expected_literal"
+rm -rf "$removal_root"
+
+(cd "$authoring_root" && MISE_PROJECT_ROOT="$authoring_root" bash mise-tasks/check/markdown-format)
+test "$(git -C "$project_root" rev-parse HEAD)" = "$head_before"
 test "$(git -C "$project_root" status --porcelain)" = "$status_before"
 printf '%s\n' 'rumdl boundary regression passed'
