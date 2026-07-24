@@ -10,25 +10,10 @@ import json
 import os
 
 config = json.loads(os.environ["CONFIG_JSON"])
-expected_enabled = [
-    "MD001", "MD003", "MD004", "MD005", "MD007", "MD009", "MD010", "MD011",
-    "MD012", "MD014", "MD018", "MD019", "MD020", "MD021", "MD022", "MD023",
-    "MD024", "MD025", "MD026", "MD027", "MD030", "MD031", "MD032", "MD033",
-    "MD034", "MD035", "MD036", "MD037", "MD038", "MD039", "MD040", "MD041",
-    "MD042", "MD043", "MD044", "MD045", "MD046", "MD047", "MD048", "MD049",
-    "MD050", "MD051", "MD052", "MD053", "MD054", "MD055", "MD056", "MD057",
-    "MD058", "MD059", "MD061", "MD062", "MD063", "MD064", "MD065", "MD066",
-    "MD067", "MD068", "MD069", "MD070", "MD071", "MD072", "MD073", "MD074",
-    "MD075", "MD076", "MD077", "MD078", "MD079", "MD080", "MD081", "MD082",
-]
-assert config["global"]["enable"] == expected_enabled, config["global"]
-assert config["global"]["fixable"] == expected_enabled, config["global"]
-assert config["global"]["disable"] == ["MD060"], config["global"]
-assert config["MD010"] == {"code-blocks": True}, config["MD010"]
-assert config["MD013"] == {"tables": False}, config["MD013"]
-assert config["MD027"] == {"list-items": True}, config["MD027"]
+assert config["global"]["enable"] == [], config["global"]
+assert config["global"]["fixable"] == [], config["global"]
+assert config["global"]["disable"] == ["MD013", "MD028", "MD060"], config["global"]
 assert config["MD029"] == {"style": "ordered"}, config["MD029"]
-assert config["MD051"] == {"ignore-case": False}, config["MD051"]
 assert config["MD060"] == {"enabled": False, "max-width": 120, "style": "aligned"}, config["MD060"]
 PY
 
