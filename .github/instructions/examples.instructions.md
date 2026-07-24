@@ -46,7 +46,7 @@ expectations differ - apply the right set:
    still be a single file with any additional context placed directly
    in the template.
 
-1. **Root-module examples** - standalone, runnable Terraform
+2. **Root-module examples** - standalone, runnable Terraform
    configurations that demonstrate a more complete workflow (for
    instance `examples/release/`, `examples/emu/`,
    `examples/repository_collaborator/`). These should follow the

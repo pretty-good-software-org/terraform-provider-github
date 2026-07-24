@@ -8,6 +8,9 @@ disable = ["MD013", "MD028"]
 [MD004]
 style = "dash"
 
+[MD029]
+style = "ordered"
+
 [MD024]
 siblings-only = true
 
@@ -16,3 +19,8 @@ allowed-elements = ["a", "br", "details", "img", "summary", "sub", "sup"]
 
 [MD052]
 shortcut-syntax = true
+
+[MD060]
+enabled = false
+style = "aligned"
+max-width = 120

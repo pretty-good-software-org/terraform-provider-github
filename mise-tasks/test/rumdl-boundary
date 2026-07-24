@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#MISE description="Regress the isolated rumdl Markdown boundary"
+set -euo pipefail
+
+project_root="${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}"
+status_before="$(git -C "$project_root" status --porcelain)"
+config_json="$(rumdl config --no-defaults --output json)"
+CONFIG_JSON="$config_json" python3 - <<'PY'
+import json
+import os
+
+config = json.loads(os.environ["CONFIG_JSON"])
+assert config["MD029"] == {"style": "ordered"}, config["MD029"]
+assert config["MD060"] == {"enabled": False, "max-width": 120, "style": "aligned"}, config["MD060"]
+assert "enabled" not in config["MD029"], config["MD029"]
+assert "MD060" in config["global"]["disable"], config["global"]
+PY
+
+for file in mise-tasks/check/markdown-format mise-tasks/format/markdown; do
+  grep -Fq -- "--extend-enable MD029,MD060 --config 'MD060.enabled = true'" "$project_root/$file"
+done
+grep -Fq -- "! -path './docs/*'" "$project_root/mise-tasks/check/markdown-format"
+grep -Fq -- "! -path './docs/*'" "$project_root/mise-tasks/format/markdown"
+
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-boundary.XXXXXX")"
+trap 'rm -rf "$fixture"' EXIT
+printf '%s\n' '# Fixture' '- one' '- two' > "$fixture/source.md"
+cp "$fixture/source.md" "$fixture/first.md"
+rumdl fmt --extend-enable MD029,MD060 --config 'MD060.enabled = true' "$fixture/first.md" >/tmp/rumdl-boundary-format.out
+cp "$fixture/first.md" "$fixture/second.md"
+rumdl fmt --extend-enable MD029,MD060 --config 'MD060.enabled = true' "$fixture/second.md" >/tmp/rumdl-boundary-format-second.out
+cmp "$fixture/first.md" "$fixture/second.md"
+
+test "$(git -C "$project_root" status --porcelain)" = "$status_before"
+printf '%s\n' 'rumdl boundary regression passed'

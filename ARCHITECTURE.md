@@ -281,9 +281,9 @@ ______________________________________________________________________
 The provider resolves credentials using the following fallback chain (first match wins):
 
 1. **Token**: `token` attribute or `GITHUB_TOKEN` env var
-1. **GitHub App**: `app_auth` block with `id`, `installation_id`, and `pem_file`
-1. **GitHub CLI**: Falls back to `gh auth token` if neither token nor app_auth is set. This method will be deprecated in a future release, so users should not rely on it for long-term authentication.
-1. **Anonymous**: Read-only access when no credentials are available
+2. **GitHub App**: `app_auth` block with `id`, `installation_id`, and `pem_file`
+3. **GitHub CLI**: Falls back to `gh auth token` if neither token nor app_auth is set. This method will be deprecated in a future release, so users should not rely on it for long-term authentication.
+4. **Anonymous**: Read-only access when no credentials are available
 
 All authentication configuration is handled in `config.go`. See the [Explicit Authentication Configuration](./DECISIONS.md#explicit-authentication-configuration) decision for design rationale.
 

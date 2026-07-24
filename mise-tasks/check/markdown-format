@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Check authored Markdown formatting with rumdl"
+set -euo pipefail
+
+# Generated provider docs retain tfplugindocs output; check authored Markdown only.
+files=()
+while IFS= read -r -d '' file; do
+  files+=("$file")
+done < <(find . -type f -name '*.md' ! -path './docs/*' -print0)
+rumdl fmt --check --extend-enable MD029,MD060 --config 'MD060.enabled = true' -- "${files[@]}"
