@@ -5,4 +5,10 @@ set -euo pipefail
 
 # Recompute the content-addressed path instead of trusting an inherited export.
 source "${MISE_PROJECT_ROOT:?MISE_PROJECT_ROOT must be set by mise}/mise-tasks/setup/mdformat-env"
-mdformat --check .
+
+# Generated provider docs retain tfplugindocs output; check authored Markdown only.
+markdown_files=()
+while IFS= read -r -d '' markdown_file; do
+  markdown_files+=("$markdown_file")
+done < <(find . -type f -name '*.md' ! -path './docs/*' -print0)
+mdformat --check "${markdown_files[@]}"

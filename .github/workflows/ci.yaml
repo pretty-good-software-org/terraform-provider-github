@@ -89,7 +89,7 @@ jobs:
       - run: make validatedocs
       - uses: rvben/rumdl@c6fa6612be03d6dd87812a1e6eb904cbbf1d9dce # v0.2.27
         with:
-          path: ./docs
+          path: .
           report-type: annotations
 
   oci:
