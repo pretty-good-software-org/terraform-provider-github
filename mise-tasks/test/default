@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Run provider unit tests"
+#MISE depends=["test:rumdl-boundary"]
 set -euo pipefail
 
 make test

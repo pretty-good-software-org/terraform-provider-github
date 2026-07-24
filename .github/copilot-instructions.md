@@ -250,9 +250,9 @@ Return findings first, HIGH before MEDIUM (no LOW — see Severity and Nit
 Policy above):
 
 1. `HIGH`/`MEDIUM` title — short impact statement
-1. File reference: `path/to/file.go:line`
-1. Why this is a problem (runtime behavior, Terraform UX, upgrade risk)
-1. Suggested fix (concise)
+2. File reference: `path/to/file.go:line`
+3. Why this is a problem (runtime behavior, Terraform UX, upgrade risk)
+4. Suggested fix (concise)
 
 Then include:
 

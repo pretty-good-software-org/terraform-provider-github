@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Lint authored Markdown with rumdl"
+set -euo pipefail
+
+# Generated provider docs retain tfplugindocs output; lint authored Markdown only.
+files=()
+while IFS= read -r -d '' file; do
+  files+=("$file")
+done < <(find . -type f -name '*.md' ! -path './docs/*' -print0)
+rumdl check --deny-config-warnings -- "${files[@]}"

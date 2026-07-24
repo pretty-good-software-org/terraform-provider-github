@@ -11,12 +11,7 @@ pre-commit:
       run: mise run lint:yamllint
       fail_text: "yamllint found issues"
 
-    markdown-format:
+    markdown:
       glob: "**/*.md"
       run: mise run check:markdown-format
-      fail_text: "mdformat found formatting issues"
-
-    markdownlint:
-      glob: "**/*.md"
-      run: mise run lint:markdownlint
-      fail_text: "markdownlint found issues"
+      fail_text: "rumdl found Markdown issues"

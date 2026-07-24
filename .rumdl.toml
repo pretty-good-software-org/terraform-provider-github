@@ -1,5 +1,52 @@
 [global]
-disable = ["MD013", "MD028"]
+# Keep the supported source rules explicit. Disabled source and formatter-only rules
+# remain available through fixable/production formatter overrides without entering lint.
+enable = [
+  "MD001",
+  "MD003",
+  "MD004",
+  "MD005",
+  "MD007",
+  "MD009",
+  "MD010",
+  "MD011",
+  "MD012",
+  "MD014",
+  "MD018",
+  "MD019",
+  "MD020",
+  "MD021",
+  "MD023",
+  "MD025",
+  "MD026",
+  "MD027",
+  "MD030",
+  "MD035",
+  "MD038",
+  "MD039",
+  "MD040",
+  "MD042",
+  "MD043",
+  "MD044",
+  "MD045",
+  "MD046",
+  "MD047",
+  "MD048",
+  "MD049",
+  "MD050",
+  "MD051",
+  "MD052",
+  "MD053",
+  "MD054",
+  "MD055",
+  "MD056",
+  "MD058",
+  "MD059",
+  "MD071",
+  "MD076",
+]
+fixable = ["MD007", "MD013", "MD029", "MD047", "MD060", "MD071", "MD076"]
+exclude = ["node_modules/**"]
 
 [per-file-ignores]
 ".github/pull_request_template.md" = ["MD041"]
@@ -8,11 +55,38 @@ disable = ["MD013", "MD028"]
 [MD004]
 style = "dash"
 
+[MD007]
+indent = 2
+style = "fixed"
+
+[MD010]
+code-blocks = true
+
+[MD013]
+tables = false
+
 [MD024]
 siblings-only = true
+
+[MD027]
+list-items = true
+
+[MD029]
+style = "ordered"
 
 [MD033]
 allowed-elements = ["a", "br", "details", "img", "summary", "sub", "sup"]
 
+[MD051]
+ignore-case = false
+
 [MD052]
 shortcut-syntax = true
+
+[MD060]
+enabled = false
+style = "aligned"
+max-width = 120
+
+[MD076]
+style = "consistent"
