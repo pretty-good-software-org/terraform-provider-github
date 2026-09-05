@@ -79,8 +79,7 @@ formatters:
 
     gofumpt:
       module-path: github.com/integrations/terraform-provider-github
-      extra:
-        group-params: true
+      extra-rules: true
     goimports:
       local-prefixes:
         - github.com/integrations/terraform-provider-github
