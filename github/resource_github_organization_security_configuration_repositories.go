@@ -84,7 +84,7 @@ func resourceGithubOrganizationSecurityConfigurationRepositoriesRead(ctx context
 	}
 	repositoryIDs := make([]int64, 0)
 	options := &github.ListCodeSecurityConfigurationRepositoriesOptions{
-		PerPage: maxPerPage,
+		PerPage: meta.maxPerPage,
 	}
 
 	for attachment, err := range meta.v3client.Organizations.ListCodeSecurityConfigurationRepositoriesIter(ctx, meta.name, configurationID, options) {
