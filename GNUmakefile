@@ -50,6 +50,7 @@ lint:
 
 lintcheck:
 	@echo "==> Checking source code against linters..."
+	golangci-lint config verify
 	golangci-lint run ./...
 
 # Checks all code against the strict rules. This is expected to fail until all issues have been fixed, but it allows us to track progress on fixing the issues and ensures that no new issues are introduced.
@@ -61,6 +62,7 @@ lintcheck-strict: .golangci.new.yml
 lintcheck-new: .golangci.new.yml
 	@branch=$$(git rev-parse --abbrev-ref HEAD); \
 	printf "==> Checking changed source code against linters on branch: \033[1m%s\033[0m...\n" "🌿 $$branch 🌿"
+	golangci-lint config verify --config .golangci.new.yml
 	golangci-lint run ./... --new-from-merge-base main --config .golangci.new.yml
 
 test:

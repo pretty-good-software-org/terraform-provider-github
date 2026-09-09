@@ -62,16 +62,18 @@ jobs:
             test="true"
             environment="acctest-dotcom"
             echo "::notice::Running in ${GITHUB_EVENT_NAME} context, proceeding with tests."
-          elif [[ "${INPUT_GITHUB_HEAD_REPO}" == "${INPUT_GITHUB_BASE_REPO}" ]]; then
-            fork="false"
-            test="true"
-            environment="acctest-dotcom"
-            echo "::notice::Running in ${GITHUB_EVENT_NAME} context from the base repository, proceeding with tests."
-          elif [[ "${INPUT_ACCTEST_LABEL_SET}" == "true" ]]; then
-            test="true"
-            echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, proceeding with tests as acctest label is set."
+          elif [[ "${INPUT_ACCTEST_LABEL_SET}" == "false" ]]; then
+            echo "::notice::Skipping tests acctest label is not set."
           else
-            echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, skipping tests as acctest label is not set."
+            if [[ "${INPUT_GITHUB_HEAD_REPO}" == "${INPUT_GITHUB_BASE_REPO}" ]]; then
+              fork="false"
+              test="true"
+              environment="acctest-dotcom"
+              echo "::notice::Running in ${GITHUB_EVENT_NAME} context from the base repository, proceeding with tests."
+            else
+              test="true"
+              echo "::warning::Running in ${GITHUB_EVENT_NAME} context from a fork ${repository}, proceeding with tests."
+            fi
           fi
 
           {
@@ -103,7 +105,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ needs.setup.outputs.repository }}
           ref: ${{ needs.setup.outputs.ref }}
@@ -182,7 +184,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Set-up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -210,6 +212,7 @@ jobs:
           TF_ACC_TERRAFORM_PATH: ${{ steps.tf.outputs.path }}
           TF_ACC: "1"
           TF_LOG: WARN
+          GITHUB_AUTH_MODE: ${{ case(matrix.mode == 'anonymous', 'none', matrix.mode == 'individual', 'token', 'app') }}
           GITHUB_APP_ID: ${{ steps.credentials.outputs.app_id }}
           GITHUB_APP_INSTALLATION_ID: ${{ steps.credentials.outputs.app_installation_id }}
           GITHUB_APP_PEM_FILE: ${{ steps.credentials.outputs.app_pem }}
