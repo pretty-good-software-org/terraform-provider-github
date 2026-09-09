@@ -179,8 +179,7 @@ func resourceGithubRepositoryEnvironmentCreate(ctx context.Context, d *schema.Re
 	envName := d.Get("environment").(string)
 	updateData := createUpdateEnvironmentData(d)
 
-	_, _, err := client.Repositories.CreateUpdateEnvironment(ctx, owner, repoName, url.PathEscape(envName), &updateData)
-	if err != nil {
+	if err := applyRepositoryEnvironment(ctx, client, owner, repoName, envName, &updateData); err != nil {
 		return diag.FromErr(err)
 	}
 
@@ -296,8 +295,7 @@ func resourceGithubRepositoryEnvironmentUpdate(ctx context.Context, d *schema.Re
 	envName := d.Get("environment").(string)
 	updateData := createUpdateEnvironmentData(d)
 
-	_, _, err := client.Repositories.CreateUpdateEnvironment(ctx, owner, repoName, url.PathEscape(envName), &updateData)
-	if err != nil {
+	if err := applyRepositoryEnvironment(ctx, client, owner, repoName, envName, &updateData); err != nil {
 		return diag.FromErr(err)
 	}
 
@@ -352,6 +350,46 @@ func resourceGithubRepositoryEnvironmentImport(ctx context.Context, d *schema.Re
 	}
 
 	return []*schema.ResourceData{d}, nil
+}
+
+// go-github v89's Team fallback silently drops CanAdminsBypass. Use its HTTP
+// client directly until CreateUpdateEnvironment preserves that field on retry.
+// https://github.com/google/go-github/blob/v89.0.0/github/repos_environments.go
+func applyRepositoryEnvironment(ctx context.Context, client *github.Client, owner, repository, environment string, data *github.CreateUpdateEnvironment) error {
+	endpoint := fmt.Sprintf("repos/%s/%s/environments/%s", owner, repository, url.PathEscape(environment))
+	err := putRepositoryEnvironment(ctx, client, endpoint, data)
+	if err == nil || !canRetryEnvironmentProtection(err, data) {
+		return err
+	}
+
+	// Team rejects reviewer/timer fields even when empty. Preserve supported
+	// branch and bypass controls rather than reporting a partial write as success.
+	supportedData := struct {
+		CanAdminsBypass        *bool                `json:"can_admins_bypass"`
+		DeploymentBranchPolicy *github.BranchPolicy `json:"deployment_branch_policy"`
+	}{
+		CanAdminsBypass:        data.CanAdminsBypass,
+		DeploymentBranchPolicy: data.DeploymentBranchPolicy,
+	}
+	return putRepositoryEnvironment(ctx, client, endpoint, &supportedData)
+}
+
+func canRetryEnvironmentProtection(err error, data *github.CreateUpdateEnvironment) bool {
+	var apiError *github.ErrorResponse
+	return errors.As(err, &apiError) && apiError.Response != nil &&
+		apiError.Response.StatusCode == http.StatusUnprocessableEntity &&
+		len(data.Reviewers) == 0 && data.GetWaitTimer() == 0 && !data.GetPreventSelfReview()
+}
+
+func putRepositoryEnvironment(ctx context.Context, client *github.Client, endpoint string, data any) error {
+	request, err := client.NewRequest(ctx, http.MethodPut, endpoint, data)
+	if err != nil {
+		return fmt.Errorf("build repository environment request: %w", err)
+	}
+	if _, err := client.Do(request, nil); err != nil {
+		return fmt.Errorf("update repository environment: %w", err)
+	}
+	return nil
 }
 
 func createUpdateEnvironmentData(d *schema.ResourceData) github.CreateUpdateEnvironment {
