@@ -3,12 +3,14 @@ package github
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"testing"
 
 	"github.com/google/go-github/v89/github"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/hashicorp/terraform-plugin-log/tflogtest"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
@@ -17,6 +19,50 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
+
+func TestResourceGithubRepositoryRulesetUpdateRejectsArchivedRepository(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ownerName      = "test-owner"
+		repositoryName = "archived-repository"
+	)
+
+	archivedRepository := github.Repository{Archived: new(true)}
+	responses := []*mockResponse{
+		mustGetTestMockResponse(t, "/repos/test-owner/archived-repository", http.StatusOK, archivedRepository),
+	}
+	server := githubApiMock(responses)
+	t.Cleanup(server.Close)
+
+	client := mustCreateTestGitHubClient(t, server.URL)
+	resourceInput := map[string]any{
+		"name":        "test",
+		"repository":  repositoryName,
+		"target":      "branch",
+		"enforcement": "active",
+		"conditions": []any{map[string]any{
+			"ref_name": []any{map[string]any{
+				"include": []any{"~DEFAULT_BRANCH"},
+				"exclude": []any{},
+			}},
+		}},
+		"rules": []any{map[string]any{"creation": true}},
+	}
+	resourceData := schema.TestResourceDataRaw(t, resourceGithubRepositoryRuleset().Schema, resourceInput)
+	resourceData.SetId("123")
+	owner := &Owner{name: ownerName, v3client: client}
+
+	diagnostics := resourceGithubRepositoryRulesetUpdate(t.Context(), resourceData, owner)
+
+	if !diagnostics.HasError() {
+		t.Fatal("expected an archived repository update error, got no error")
+	}
+	const expected = "cannot update ruleset on archived repository test-owner/archived-repository"
+	if actual := diagnostics[0].Summary; actual != expected {
+		t.Fatalf("expected diagnostic %q, got %q", expected, actual)
+	}
+}
 
 func TestAccGithubRepositoryRuleset(t *testing.T) {
 	t.Parallel()
@@ -648,10 +694,8 @@ resource "github_repository_ruleset" "test" {
 		})
 	})
 
-	t.Run("skips update and delete on archived repository", func(t *testing.T) {
+	t.Run("rejects update on archived repository", func(t *testing.T) {
 		t.Parallel()
-
-		t.Skip("TODO: Fix the archived behavior as if update is skipping read needs to do so too.")
 
 		randomID := acctest.RandStringFromCharSet(5, acctest.CharSetAlphaNum)
 		repoName := fmt.Sprintf("%srepo-ruleset-arch-%s", testResourcePrefix, randomID)
@@ -688,7 +732,11 @@ resource "github_repository_ruleset" "test" {
 					Config: fmt.Sprintf(config, repoName, archivedAfter, testAccConf.testRepositoryVisibility, enforcementBefore),
 				},
 				{
-					Config: fmt.Sprintf(config, repoName, archivedAfter, testAccConf.testRepositoryVisibility, enforcementAfter),
+					Config:      fmt.Sprintf(config, repoName, archivedAfter, testAccConf.testRepositoryVisibility, enforcementAfter),
+					ExpectError: regexp.MustCompile("cannot update ruleset on archived repository"),
+				},
+				{
+					Config: fmt.Sprintf(config, repoName, archivedBefore, testAccConf.testRepositoryVisibility, enforcementBefore),
 				},
 			},
 		})
