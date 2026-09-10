@@ -10,6 +10,8 @@ Creates a GitHub repository ruleset.
 
 This resource allows you to create and manage rulesets on the repository level. When applied, a new ruleset will be created. When destroyed, that ruleset will be removed.
 
+GitHub makes archived repositories read-only. Unarchive a repository before changing its ruleset; an attempted update returns an error rather than reporting success without changing the remote ruleset.
+
 ## Example Usage
 
 ```terraform

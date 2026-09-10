@@ -810,14 +810,14 @@ func resourceGithubRepositoryRulesetUpdate(ctx context.Context, d *schema.Resour
 		return diag.FromErr(unconvertibleIdErr(d.Id(), err))
 	}
 
-	// Check if repository is archived - skip update if it is
+	// GitHub makes archived repositories read-only. Fail rather than reporting
+	// success for an update that cannot change the remote ruleset.
 	repo, _, err := client.Repositories.Get(ctx, owner, repoName)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 	if repo.GetArchived() {
-		tflog.Info(ctx, "Repository is archived, skipping ruleset update", map[string]any{"owner": owner, "repo_name": repoName})
-		return nil
+		return diag.Errorf("cannot update ruleset on archived repository %s/%s", owner, repoName)
 	}
 
 	ruleset, resp, err := client.Repositories.UpdateRuleset(ctx, owner, repoName, rulesetID, rulesetReq)
