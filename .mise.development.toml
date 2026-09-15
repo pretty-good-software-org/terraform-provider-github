@@ -1,6 +1,6 @@
 # Development profile — additional tools for local work
 [tools]
-lefthook = "1.13.6"
+lefthook = "2.1.14"
 gitleaks = "8.30.0"
 
 [settings]
